@@ -2,7 +2,6 @@
 #define TH_GENERIC_FILE "generic/THTensorMath.c"
 #else
 
-#ifndef TH_GENERIC_NO_MATH
 #define TH_OMP_OVERHEAD_THRESHOLD 100000
 
 void THTensor_(fill)(THTensor *r_, real value)
@@ -2042,53 +2041,111 @@ void THTensor_(catArray)(THTensor *result, THTensor **inputs, int numInputs, int
   THLongStorage *size;
   int i, j;
   long offset;
-  int ndim = dimension + 1;
+  int maxDim = dimension + 1;
+  int allEmpty = 1;
+  int allContiguous = 1;
+  int ldimension = dimension;
+
   for (i = 0; i < numInputs; i++)
   {
-    ndim = THMax(ndim, inputs[i]->nDimension);
+    maxDim = THMax(maxDim, inputs[i]->nDimension);
+  }
+
+  // When the user input dimension is -1 (i.e. -2 in C)
+  // Then we pick the maximum last dimension across all tensors.
+  if ( dimension == -2 )
+  {
+    ldimension = maxDim?(maxDim-1):0;
   }
 
   THArgCheck(numInputs > 0, 3, "invalid number of inputs %d", numInputs);
-  THArgCheck(dimension >= 0, 4, "invalid dimension %d", dimension + TH_INDEX_BASE);
+  THArgCheck(ldimension >= 0, 4, "invalid dimension %d", dimension + TH_INDEX_BASE);
 
-  size = THLongStorage_newWithSize(ndim);
-  for(i = 0; i < ndim; i++)
+  size = THLongStorage_newWithSize(maxDim);
+
+  for(i = 0; i < maxDim; i++)
   {
-    long dimSize = i < inputs[0]->nDimension ? inputs[0]->size[i] : 1;
-    if (i == dimension)
+    // dimSize is either the size of the dim if it exists, either 1 if #dim > 0, otherwise 0
+    long dimSize = i < inputs[0]->nDimension ? inputs[0]->size[i] : THMin(inputs[0]->nDimension, 1);
+    if (i == ldimension)
     {
       for (j = 1; j < numInputs; j++)
       {
-        dimSize += i < inputs[j]->nDimension ? inputs[j]->size[i] : 1;
+        // accumulate the size over the dimension we want to cat on.
+        // Empty tensors are allowed
+        dimSize += i < inputs[j]->nDimension ? inputs[j]->size[i] : THMin(inputs[j]->nDimension, 1);
+        if(inputs[j]->nDimension)
+        {
+          allContiguous = allContiguous && THTensor_(isContiguous)(inputs[j]);
+        }
       }
     }
     else
     {
       for (j = 1; j < numInputs; j++)
       {
-        if (dimSize != (i < inputs[j]->nDimension ? inputs[j]->size[i] : 1))
+        long sz = (i < inputs[j]->nDimension ? inputs[j]->size[i] : THMin(inputs[j]->nDimension, 1));
+        // If it's a dimension we're not catting on
+        // Then fail if sizes are different AND > 0
+        if (dimSize != sz && dimSize && sz)
         {
           THLongStorage_free(size);
           THError("inconsistent tensor sizes");
         }
+        else if(!dimSize)
+        {
+          dimSize = sz;
+        }
       }
     }
+    allEmpty = allEmpty && !dimSize;
     size->data[i] = dimSize;
   }
 
-  THTensor_(resize)(result, size, NULL);
-  THLongStorage_free(size);
-
-  offset = 0;
-  for (j = 0; j < numInputs; j++)
+  // Initiate catting and resizing
+  // If at least one of the input is not empty
+  if (!allEmpty)
   {
-    long dimSize = dimension < inputs[j]->nDimension ? inputs[j]->size[dimension] : 1;
-    THTensor *nt = THTensor_(newWithTensor)(result);
-    THTensor_(narrow)(nt, NULL, dimension, offset, dimSize);
-    THTensor_(copy)(nt, inputs[j]);
-    THTensor_(free)(nt);
-    offset += dimSize;
+    THTensor_(resize)(result, size, NULL);
+
+    allContiguous = allContiguous && THTensor_(isContiguous)(result);
+
+    // First path is for contiguous inputs along dim 1
+    // Second path for non-contiguous
+    if (ldimension == 0 && allContiguous)
+    {
+      real* result_data = result->storage->data + result->storageOffset;
+      offset = 0;
+      for (j = 0; j < numInputs; j++)
+      {
+        if (inputs[j]->nDimension)
+        {
+          THTensor* input0 = inputs[j];
+          real* input0_data = input0->storage->data + input0->storageOffset;
+          long input0_size = THTensor_(nElement)(input0);
+          memcpy(result_data + offset, input0_data, input0_size*sizeof(real));
+          offset += input0_size;
+        }
+      }
+    }
+    else
+    {
+      offset = 0;
+      for (j = 0; j < numInputs; j++)
+      {
+        if (inputs[j]->nDimension)
+        {
+          long dimSize = ldimension < inputs[j]->nDimension ? inputs[j]->size[ldimension] : 1;
+          THTensor *nt = THTensor_(newWithTensor)(result);
+          THTensor_(narrow)(nt, NULL, ldimension, offset, dimSize);
+          THTensor_(copy)(nt, inputs[j]);
+          THTensor_(free)(nt);
+          offset += dimSize;
+        }
+      }
+    }
   }
+  THLongStorage_free(size);
 }
 
 int THTensor_(equal)(THTensor *ta, THTensor* tb)
@@ -2546,9 +2603,9 @@ void THTensor_(histc)(THTensor *hist, THTensor *tensor, long nbins, real minvalu
 }
 
 void THTensor_(bhistc)(THTensor *hist, THTensor *tensor, long nbins, real minvalue, real maxvalue)
-{  
+{
   THArgCheck(THTensor_(nDimension)(tensor) < 3, 2, "invalid dimension %d, the input must be a 2d tensor", THTensor_(nDimension)(tensor));
-  
+
   int dimension = 1;
   THArgCheck(dimension >= 0 && dimension < THTensor_(nDimension)(tensor), 2, "invalid dimension %d",
       dimension + TH_INDEX_BASE);
@@ -2575,7 +2632,7 @@ void THTensor_(bhistc)(THTensor *hist, THTensor *tensor, long nbins, real minval
 
   TH_TENSOR_DIM_APPLY2(real, tensor, real, hist, dimension, long i;
                         for(i = 0; i < tensor_size; i++)
-                        {  
+                        {
                           if(tensor_data[i*tensor_stride] >= minval && tensor_data[i*tensor_stride] <= maxval) {
                             const int bin = (int)((tensor_data[i*tensor_stride]-minval) / (maxval-minval) * nbins);
                             hist_data[THMin(bin, nbins-1)] += 1;
@@ -2586,5 +2643,4 @@ void THTensor_(bhistc)(THTensor *hist, THTensor *tensor, long nbins, real minval
 
 #endif /* floating point only part */
 #undef IS_NONZERO
-#endif /* TH_GENERIC_NO_MATH */
 #endif
