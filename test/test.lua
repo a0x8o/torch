@@ -112,7 +112,7 @@ local genericSingleOpTest = [[
       end
    end
    return maxerrc, maxerrnc
-]]
+--]]
 
 function torchtest.sin()
    local f = loadstring(string.gsub(genericSingleOpTest, 'functionname', 'sin'))
@@ -343,6 +343,12 @@ function torchtest.round()
 end
 
 function torchtest.max()  -- torch.max([resval, resind,] x [,dim])
+
+   -- TH_TENSOR_BASE
+   local m1 = torch.Tensor(8,2):fill(3):select(2, 1)
+   local resval, resind = torch.max(m1, 1)
+   mytester:assert(resind[1] == 1)
+
    -- torch.max( x )
    -- contiguous
    local m1 = torch.randn(100,100)
@@ -357,6 +363,7 @@ function torchtest.max()  -- torch.max([resval, resind,] x [,dim])
    end
    local err = res1 - res2
    mytester:assertlt(err, precision, 'error in torch.max - contiguous')
+
    -- non-contiguous
    local m1 = torch.randn(10,10,10)
    local m2 = m1[{{}, 4, {}}]
@@ -371,33 +378,34 @@ function torchtest.max()  -- torch.max([resval, resind,] x [,dim])
    end
    local err = res1 - res2
    mytester:assertlt(err, precision, 'error in torch.max - non-contiguous')
+
    -- torch.max([resval, resind,] x ,dim])
-   local m1 = torch.randn(100,100)
-   local res1val, res1ind = torch.max(m1, 2)
-   local res2val = res1val:clone():zero()
-   local res2ind = res1ind:clone():zero()
-   for i=1, m1:size(1) do
-      res2val[i] = m1[i][1]
-      res2ind[i] = 1
-      for j=1, m1:size(2) do
-         if m1[i][j] > res2val[i][1] then
-            res2val[i] = m1[i][j]
-            res2ind[i] = j
+   function lua_max(t, dim)
+      assert(t:nDimension() == 2)
+      max_val = t:narrow(dim, 1, 1):clone()
+      max_ind = t:narrow(dim, 1, 1):clone():long():fill(1)
+      other = 3 - dim
+      for i = 1, t:size(other) do
+         for j = 1, t:size(dim) do
+            val = t:select(other, i):select(dim, j)
+            max = max_val:select(other, i):select(dim, 1)
+            if val > max then
+               max_val:select(other, i):fill(val)
+               max_ind:select(other, i):fill(j)
+            end
          end
       end
+      return max_val, max_ind
    end
-   local errval = res1val:clone():zero()
-   for i = 1, res1val:size(1) do
-      errval[i] = math.abs(res1val[i][1] - res2val[i][1])
-      mytester:asserteq(res1ind[i][1], res2ind[i][1], 'error in torch.max - non-contiguous')
+
+   local m1 = torch.randn(100,100)
+   for dim = 1,2 do
+      local res1val, res1ind = torch.max(m1, dim)
+      local res2val, res2ind = lua_max(m1, dim)
+      mytester:asserteq((res1val-res2val):abs():max(), 0, 'error in torch.max')
+      mytester:asserteq((res1ind-res2ind):abs():max(), 0, 'error in torch.max')
    end
-   local maxerr = 0
-   for i = 1, errval:size(1) do
-      if errval[i][1] > maxerr then
-         maxerr = errval[i]
-      end
-   end
-   mytester:assertlt(maxerr, precision, 'error in torch.max - non-contiguous')
+
    -- NaNs
    for index in pairs{1, 5, 100} do
       local m1 = torch.randn(100)
@@ -439,33 +447,34 @@ function torchtest.min()  -- torch.min([resval, resind,] x [,dim])
    end
    local err = res1 - res2
    mytester:assertlt(err, precision, 'error in torch.min - non-contiguous')
-   -- torch.min([resval, resind,] x ,dim])
-   local m1 = torch.randn(100,100)
-   local res1val, res1ind = torch.min(m1, 2)
-   local res2val = res1val:clone():zero()
-   local res2ind = res1ind:clone():zero()
-   for i=1, m1:size(1) do
-      res2val[i] = m1[i][1]
-      res2ind[i] = 1
-      for j=1, m1:size(2) do
-         if m1[i][j] < res2val[i][1] then
-            res2val[i] = m1[i][j]
-            res2ind[i] = j
+
+   -- torch.max([resval, resind,] x ,dim])
+   function lua_min(t, dim)
+      assert(t:nDimension() == 2)
+      max_val = t:narrow(dim, 1, 1):clone()
+      max_ind = t:narrow(dim, 1, 1):clone():long():fill(1)
+      other = 3 - dim
+      for i = 1, t:size(other) do
+         for j = 1, t:size(dim) do
+            val = t:select(other, i):select(dim, j)
+            max = max_val:select(other, i):select(dim, 1)
+            if val < max then
+               max_val:select(other, i):fill(val)
+               max_ind:select(other, i):fill(j)
+            end
          end
       end
+      return max_val, max_ind
    end
-   local errval = res1val:clone():zero()
-   for i = 1, res1val:size(1) do
-      errval[i] = math.abs(res1val[i][1] - res2val[i][1])
-      mytester:asserteq(res1ind[i][1], res2ind[i][1], 'error in torch.min - non-contiguous')
+
+   local m1 = torch.randn(100,100)
+   for dim = 1,2 do
+      local res1val, res1ind = torch.min(m1, dim)
+      local res2val, res2ind = lua_min(m1, dim)
+      mytester:asserteq((res1val-res2val):abs():max(), 0, 'error in torch.max')
+      mytester:asserteq((res1ind-res2ind):abs():max(), 0, 'error in torch.max')
    end
-   local minerr = 0
-   for i = 1, errval:size(1) do
-      if errval[i][1] < minerr then
-         minerr = errval[i]
-      end
-   end
-   mytester:assertlt(minerr, precision, 'error in torch.min - non-contiguous')
+
    -- NaNs
    for index in pairs{1, 5, 100} do
       local m1 = torch.randn(100)
@@ -476,6 +485,11 @@ function torchtest.min()  -- torch.min([resval, resind,] x [,dim])
       local res1val = torch.min(m1)
       mytester:assert(res1val ~= res1val, 'error in torch.min - NaNs')
    end
+
+   -- TH_TENSOR_BASE
+   local m1 = torch.Tensor(4):fill(3)
+   local resval, resind = torch.min(m1, 1)
+   mytester:assert(resind[1] == 1)
 end
 
 function torchtest.cmax()
@@ -572,6 +586,47 @@ function torchtest.mv()
    local err = (res1-res2):abs():max()
 
    mytester:assertlt(err, precision, 'error in torch.mv')
+end
+
+function torchtest.fill()
+   local types = {
+      'torch.ByteTensor',
+      'torch.CharTensor',
+      'torch.ShortTensor',
+      'torch.IntTensor',
+      'torch.FloatTensor',
+      'torch.DoubleTensor',
+      'torch.LongTensor',
+   }   
+
+   for k,t in ipairs(types) do
+      -- [res] torch.fill([res,] tensor, value)
+      local m1 = torch.ones(100,100):type(t)
+      local res1 = m1:clone()
+      res1[{ 3,{} }]:fill(2)
+      
+      local res2 = m1:clone()
+      for i = 1,m1:size(1) do
+	 res2[{ 3,i }] = 2
+      end
+      
+      local err = (res1-res2):double():abs():max()
+      
+      mytester:assertlt(err, precision, 'error in torch.fill - contiguous')
+      
+      local m1 = torch.ones(100,100):type(t)
+      local res1 = m1:clone()
+      res1[{ {},3 }]:fill(2)
+      
+      local res2 = m1:clone()
+      for i = 1,m1:size(1) do
+	 res2[{ i,3 }] = 2
+      end
+      
+      local err = (res1-res2):double():abs():max()
+      
+      mytester:assertlt(err, precision, 'error in torch.fill - non contiguous')
+   end
 end
 
 function torchtest.add()
@@ -1492,6 +1547,16 @@ function torchtest.sum()
    local mxx = torch.Tensor()
    torch.sum(mxx,x,2)
    mytester:asserteq(maxdiff(mx,mxx),0,'torch.sum value')
+
+   local y = torch.rand(5, 5, 5)
+   for i=1,3 do
+      local a = y:sum(i)
+      local b = y:narrow(i, 1, 1):clone():zero()
+      for j = 1, 5 do
+         b:add(y:narrow(i, j, 1))
+      end
+      mytester:asserteq(maxdiff(a, b), 0, 'torch.sum value')
+   end
 end
 function torchtest.prod()
    local x = torch.rand(msize,msize)
@@ -1499,6 +1564,16 @@ function torchtest.prod()
    local mxx = torch.Tensor()
    torch.prod(mxx,x,2)
    mytester:asserteq(maxdiff(mx,mxx),0,'torch.prod value')
+
+   local y = torch.rand(5, 5, 5)
+   for i=1,3 do
+      local a = y:prod(i)
+      local b = y:narrow(i, 1, 1):clone():fill(1)
+      for j = 1, 5 do
+         b:cmul(y:narrow(i, j, 1))
+      end
+      mytester:asserteq(maxdiff(a, b), 0, 'torch.sum value')
+   end
 end
 function torchtest.cumsum()
    local x = torch.rand(msize,msize)
