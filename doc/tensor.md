@@ -4,14 +4,14 @@
 The `Tensor` class is probably the most important class in
 `Torch`. Almost every package depends on this class. It is *__the__*
 class for handling numeric data. As with   pretty much anything in
-[Torch7](./../index.md), tensors are
+[Torch7](./index.md), tensors are
 [serializable](file.md#torch.File.serialization).
 
 __Multi-dimensional matrix__
 
-A `Tensor` is a potentially multi-dimensional matrix. The number of
-dimensions is unlimited that can be created using
-[LongStorage](storage.md) with more dimensions.
+A `Tensor` is a multi-dimensional matrix. The number of
+dimensions is unlimited (up to what can be created using
+[LongStorage](storage.md)).
 
 Example:
 ```lua
@@ -554,7 +554,7 @@ false
 <a name="torch.Tensor.double"></a>
 <a name="torch.Tensor.float"></a>
 
-Convenience methods for the [type](#torch.type) method. For e.g.,
+Convenience methods for the [type](#torch.type) method. For example:
 ```lua
 x = torch.Tensor(3):fill(3.14)
 > x
