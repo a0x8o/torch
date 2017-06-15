@@ -1,6 +1,7 @@
 # This list is required for static linking and exported to Caffe2Config.cmake
 set(Caffe2_DEPENDENCY_LIBS "")
 set(Caffe2_PYTHON_DEPENDENCY_LIBS "")
+set(Caffe2_EXTERNAL_DEPENDENCIES "")
 
 # ---[ Custom Protobuf
 include("cmake/ProtoBuf.cmake")
@@ -198,7 +199,7 @@ endif()
 
 # ---[ EIGEN
 add_definitions(-DEIGEN_MPL2_ONLY)
-find_package(Eigen3)
+find_package(Eigen3 QUIET)
 if(EIGEN3_FOUND)
   include_directories(SYSTEM ${EIGEN3_INCLUDE_DIRS})
 else()

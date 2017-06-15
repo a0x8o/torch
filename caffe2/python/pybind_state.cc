@@ -90,6 +90,8 @@ const TypeMeta& NumpyTypeToCaffe(int numpy_type) {
       {NPY_UINT8, TypeMeta::Make<uint8_t>()},
       {NPY_UINT16, TypeMeta::Make<uint16_t>()},
       {NPY_OBJECT, TypeMeta::Make<std::string>()},
+      {NPY_UNICODE, TypeMeta::Make<std::string>()},
+      {NPY_STRING, TypeMeta::Make<std::string>()},
       // Note: Add more types here.
   };
   static TypeMeta unknown_type;
@@ -158,10 +160,97 @@ py::object fetchBlob(Workspace* ws, const std::string& name) {
     std::stringstream ss;
     ss << caffe2::string(name) << ", a C++ native class of type "
        << blob.TypeName() << ".";
-    return py::str(ss.str());
+    return py::bytes(ss.str());
   }
 }
 }
+
+void printPythonStackTrace() {
+  PyObject *type = nullptr, *value = nullptr, *trace = nullptr;
+  PyErr_Fetch(&type, &value, &trace);
+  PyTracebackObject* traceback = reinterpret_cast<PyTracebackObject*>(trace);
+  vector<PyTracebackObject*> trace_vec;
+  while (traceback) {
+    trace_vec.push_back(traceback);
+    traceback = traceback->tb_next;
+  }
+  for (int i = trace_vec.size() - 1; i >= 0; --i) {
+    int line = trace_vec[i]->tb_lineno;
+    const char* filename;
+    const char* funcname;
+    if (PyUnicode_Check(trace_vec[i]->tb_frame->f_code->co_filename)) {
+      auto encoded = PyUnicode_AsEncodedString(
+          trace_vec[i]->tb_frame->f_code->co_filename, "ASCII", "replace");
+      if (encoded != nullptr) {
+        filename = strdup(PyBytes_AS_STRING(encoded));
+        Py_DECREF(encoded);
+      } else {
+        filename = "<unknown>";
+      }
+    } else {
+      filename = PyBytes_AsString(trace_vec[i]->tb_frame->f_code->co_filename);
+    }
+    if (PyUnicode_Check(trace_vec[i]->tb_frame->f_code->co_name)) {
+      auto encoded = PyUnicode_AsEncodedString(
+          trace_vec[i]->tb_frame->f_code->co_name, "ASCII", "replace");
+      if (encoded != nullptr) {
+        funcname = strdup(PyBytes_AS_STRING(encoded));
+        Py_DECREF(encoded);
+      } else {
+        funcname = "<unknown>";
+      }
+    } else {
+      funcname = PyBytes_AsString(trace_vec[i]->tb_frame->f_code->co_name);
+    }
+
+    LOG(ERROR) << "    # " << trace_vec.size() - i - 1 << "  " << filename
+               << " (" << line << "): " << funcname;
+  }
+  Py_XDECREF(type);
+  Py_XDECREF(value);
+  Py_XDECREF(trace);
+}
+
+PythonOpBase::PythonOpBase(
+    const OperatorDef& operator_def,
+    Workspace* ws,
+    const std::string& pickled_builder_arg_name)
+    : Operator(operator_def, ws),
+      ws_(ws),
+      token_(OperatorBase::GetSingleArgument<std::string>("token", "")) {
+  using namespace python_detail;
+  auto pickled = GetSingleArgument<string>(pickled_builder_arg_name, "");
+  CAFFE_ENFORCE(
+      !pickled.empty() || !token_.empty(),
+      "PythonOp requires either pickled_builder or token arg.");
+  if (!pickled.empty()) {
+    py::gil_scoped_acquire g;
+    try {
+      auto pickle =
+          py::object(PyImport_ImportModule("pickle"), /* borrowed */ false);
+      CAFFE_ENFORCE(pickle);
+      auto loads = pickle.attr("loads").cast<py::object>();
+      CAFFE_ENFORCE(loads);
+      auto builder_call = loads(pickled).cast<py::tuple>();
+      CAFFE_ENFORCE(builder_call);
+      CAFFE_ENFORCE_EQ(py::len(builder_call), 3);
+      auto func = builder_call[0].cast<py::object>();
+      auto args = builder_call[1].cast<py::tuple>();
+      auto kwargs = builder_call[2].cast<py::dict>();
+      auto built_func = func(*args, **kwargs);
+      CAFFE_ENFORCE(built_func);
+      built_func_.reset(new Func{
+          built_func, GetSingleArgument<bool>("pass_workspace", false)});
+    } catch (const py::error_already_set& e) {
+      LOG(ERROR) << "Python exception encountered while creating PythonOp: "
+                 << e.what() << "\nTraceback: ";
+      printPythonStackTrace();
+      CAFFE_THROW("Python exception encountered while creating PythonOp.");
+    }
+  }
+}
+
+PythonOpBase::~PythonOpBase() {}
 
 bool PythonOpBase::RunOnDevice() {
   std::vector<TensorCPU*> inputs;
@@ -174,61 +263,43 @@ bool PythonOpBase::RunOnDevice() {
   for (auto i = 0; i < OutputSize(); ++i) {
     outputs.push_back(Output(i));
   }
-  auto& pyFunc = getFunc();
+  auto* pyFunc = built_func_ ? built_func_.get() : &getFunc(token_);
+  CAFFE_ENFORCE(pyFunc);
   {
     // Acquire GIL for call to Python runtime.
     py::gil_scoped_acquire g;
     try {
-      if (pyFunc.needs_workspace) {
-        pyFunc.py_func(inputs, outputs, ws_);
+      if (pyFunc->needs_workspace) {
+        pyFunc->py_func(inputs, outputs, ws_);
       } else {
-        pyFunc.py_func(inputs, outputs);
+        pyFunc->py_func(inputs, outputs);
       }
     } catch (const py::error_already_set& e) {
       LOG(ERROR) << "Exception encountered running PythonOp function: "
                  << e.what() << "\nTraceback: ";
-      PyObject *type = nullptr, *value = nullptr, *trace = nullptr;
-      PyErr_Fetch(&type, &value, &trace);
-      PyTracebackObject* traceback =
-          reinterpret_cast<PyTracebackObject*>(trace);
-      vector<PyTracebackObject*> trace_vec;
-      while (traceback) {
-        trace_vec.push_back(traceback);
-        traceback = traceback->tb_next;
-      }
-      for (int i = trace_vec.size() - 1; i >= 0; --i) {
-        int line = trace_vec[i]->tb_lineno;
-        const char* filename =
-            PyString_AsString(trace_vec[i]->tb_frame->f_code->co_filename);
-        const char* funcname =
-            PyString_AsString(trace_vec[i]->tb_frame->f_code->co_name);
-        LOG(ERROR) << "    # " << trace_vec.size() - i - 1 << "  " << filename
-                   << " (" << line << "): " << funcname;
-      }
-      Py_XDECREF(type);
-      Py_XDECREF(value);
-      Py_XDECREF(trace);
+      printPythonStackTrace();
       return false;
     }
   }
   return true;
 }
 
-const python_detail::Func& PythonOp::getFunc() {
-  const std::string& token =
-      OperatorBase::GetSingleArgument<std::string>("token", "");
+const python_detail::Func& PythonOp::getFunc(const std::string& token) {
   return python_detail::getOpFunc(token);
 }
 
-const python_detail::Func& PythonGradientOp::getFunc() {
-  const std::string& token =
-      OperatorBase::GetSingleArgument<std::string>("token", "");
+const python_detail::Func& PythonGradientOp::getFunc(const std::string& token) {
   return python_detail::getGradientFunc(token);
 }
 
 struct GetPythonGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
   std::vector<OperatorDef> GetGradientDefs() override {
+    ArgumentHelper helper(Def());
+    auto gradOutputIndices =
+        helper.GetRepeatedArgument<int>("grad_output_indices");
+    auto gradInputIndices =
+        helper.GetRepeatedArgument<int>("grad_input_indices");
     std::vector<std::string> gradientInputs;
     for (int i = 0; i < def_.input_size(); ++i) {
       gradientInputs.push_back(I(i));
@@ -236,12 +307,26 @@ struct GetPythonGradient : public GradientMakerBase {
     for (int i = 0; i < def_.output_size(); ++i) {
       gradientInputs.push_back(O(i));
     }
-    for (int i = 0; i < def_.output_size(); ++i) {
-      gradientInputs.push_back(GO(i));
+    if (gradOutputIndices.size() > 0) {
+      for (int i = 0; i < gradOutputIndices.size(); ++i) {
+        int GO_i = gradOutputIndices[i];
+        gradientInputs.push_back(GO(GO_i));
+      }
+    } else {
+      for (int i = 0; i < def_.output_size(); ++i) {
+        gradientInputs.push_back(GO(i));
+      }
     }
     std::vector<std::string> gradientOutputs;
-    for (int i = 0; i < def_.input_size(); ++i) {
-      gradientOutputs.push_back(GI(i));
+    if (gradInputIndices.size() > 0) {
+      for (int i = 0; i < gradInputIndices.size(); ++i) {
+        int GI_i = gradInputIndices[i];
+        gradientOutputs.push_back(GI(GI_i));
+      }
+    } else {
+      for (int i = 0; i < def_.input_size(); ++i) {
+        gradientOutputs.push_back(GI(i));
+      }
     }
 
     return SingleGradientDef(
@@ -319,7 +404,7 @@ void addObjectMethods(py::module& m) {
               return true;
             }
 
-            if (PyString_Check(arg.ptr())) { // string
+            if (PyBytes_Check(arg.ptr()) || PyUnicode_Check(arg.ptr())) {
               *blob->GetMutable<std::string>() = arg.cast<std::string>();
               return true;
             }
@@ -456,6 +541,12 @@ void addObjectMethods(py::module& m) {
             py::gil_scoped_release g;
             CAFFE_ENFORCE(self->RunPlan(proto));
           })
+      .def(
+          "last_failed_op_uuid",
+          [](Workspace* self) {
+            CAFFE_ENFORCE(self);
+            return (uint64_t)self->last_failed_op_uuid;
+          })
       .def_property_readonly_static("current", [](py::object /* type */) {
         auto ws = gWorkspaces.find(gCurrentWorkspaceName);
         CAFFE_ENFORCE(ws != gWorkspaces.end());
@@ -475,8 +566,7 @@ void addObjectMethods(py::module& m) {
 
   m.def(
       "get_gradient_defs",
-      [](const py::bytes& op_def,
-         std::vector<GradientWrapper> output_gradients) {
+      [](py::bytes op_def, std::vector<GradientWrapper> output_gradients) {
         OperatorDef def;
         CAFFE_ENFORCE(ParseProtobufFromLargeString(op_def, &def));
         CAFFE_ENFORCE(caffe2::GradientRegistry()->Has(def.type()));
@@ -828,8 +918,7 @@ void addGlobalMethods(py::module& m) {
           feeder->Feed(option, array, blob);
           return true;
         }
-
-        if (PyString_Check(arg.ptr())) { // string
+        if (PyBytes_Check(arg.ptr()) || PyUnicode_Check(arg.ptr())) { // string
           *blob->GetMutable<std::string>() = arg.cast<std::string>();
           return true;
         }
@@ -874,7 +963,10 @@ void addGlobalMethods(py::module& m) {
         gRegistery()[token] = Func{func, pass_workspace};
         return token;
       });
-
+  m.def("last_failed_op_uuid", []() {
+    CAFFE_ENFORCE(gWorkspace);
+    return (uint64_t)gWorkspace->last_failed_op_uuid;
+  });
   m.def(
       "register_python_gradient_op",
       [](const std::string& token, py::object func) {
@@ -884,6 +976,27 @@ void addGlobalMethods(py::module& m) {
         // For global sanity gradient ops shouldn't access workspace
         gRegistery()[token + "_gradient"] = Func{func, false};
       });
+  m.def("infer_op_input_output_device", [](const py::bytes& op) {
+    std::unique_ptr<caffe2::OperatorDef> def(new caffe2::OperatorDef());
+    CAFFE_ENFORCE(def.get()->ParseFromString(op));
+    // device_info is a pair of vector of DeviceOption.
+    // `first` is for inputs, `second` is for outputs.
+    auto device_info = InferOpInputOutputDevice(*def);
+
+    std::vector<py::bytes> in_res;
+    std::vector<py::bytes> out_res;
+    for (auto& in_dev : device_info.first) {
+      std::string protob;
+      CAFFE_ENFORCE(in_dev.SerializeToString(&protob));
+      in_res.push_back(py::bytes(protob));
+    }
+    for (auto& out_dev : device_info.second) {
+      std::string protob;
+      CAFFE_ENFORCE(out_dev.SerializeToString(&protob));
+      out_res.push_back(py::bytes(protob));
+    }
+    return std::make_pair(in_res, out_res);
+  });
 
 #define CAFFE2_CPU_FEATURE_SUPPORT(feature)      \
   m.def("builtin_cpu_supports_" #feature, []() { \

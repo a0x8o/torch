@@ -1,15 +1,25 @@
 ## @package workspace
 # Module caffe2.python.workspace
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 import contextlib
 from google.protobuf.message import Message
 from multiprocessing import Process
 import os
+try:
+    from past.builtins import basestring
+except ImportError:
+    print("You don't have the past package installed. ",
+          "This is necessary for python 2/3 compatibility. ",
+          "To do this, do 'pip install future'.")
+    import sys
+    sys.exit(1)
 import shutil
 import socket
 import tempfile
 import logging
-
-from six import string_types
 
 import numpy as np
 from caffe2.proto import caffe2_pb2
@@ -33,6 +43,8 @@ Workspaces = C.workspaces
 BenchmarkNet = C.benchmark_net
 Predictor = C.Predictor
 
+operator_tracebacks = {}
+
 is_asan = C.is_asan
 has_gpu_support = C.has_gpu_support
 if has_gpu_support:
@@ -49,14 +61,6 @@ else:
     GetDefaultGPUID = lambda: 0 # noqa
     GetCuDNNVersion = lambda: 0 # noqa
     GetCudaPeerAccessPattern = lambda: np.array([]) # noqa
-
-
-# Python 2 and 3 compatibility: test if basestring exists
-try:
-    basestring  # NOQA
-except NameError:
-    # This is python3 so we define basestring.
-    basestring = str
 
 
 def _GetFreeFlaskPort():
@@ -113,7 +117,7 @@ def StringifyProto(obj):
   Raises:
     AttributeError: if the passed in object does not have the right attribute.
   """
-    if isinstance(obj, string_types):
+    if isinstance(obj, basestring):
         return obj
     else:
         if isinstance(obj, Message):
@@ -142,7 +146,8 @@ def CreateNet(net, overwrite=False, input_blobs=None):
         input_blobs = []
     for input_blob in input_blobs:
         C.create_blob(input_blob)
-    return C.create_net(StringifyProto(net), overwrite)
+    return CallWithExceptionIntercept(
+        C.create_net, C.last_failed_op_uuid, StringifyProto(net), overwrite)
 
 
 def RunOperatorOnce(operator):
@@ -157,8 +162,20 @@ def RunOperatorsOnce(operators):
     return True
 
 
+def CallWithExceptionIntercept(func, uuid_fetcher, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception as ex:
+        uuid = uuid_fetcher()
+        if uuid in operator_tracebacks:
+            for line in operator_tracebacks[uuid]:
+                print(':'.join(map(str, line)))
+        raise ex
+
+
 def RunNetOnce(net):
-    return C.run_net_once(StringifyProto(net))
+    return CallWithExceptionIntercept(
+        C.run_net_once, C.last_failed_op_uuid, StringifyProto(net))
 
 
 def RunNet(name, num_iter=1, allow_fail=False):
@@ -171,7 +188,9 @@ def RunNet(name, num_iter=1, allow_fail=False):
     Returns:
       True or an exception.
     """
-    return C.run_net(StringifyNetName(name), num_iter, allow_fail)
+    return CallWithExceptionIntercept(
+        C.run_net, C.last_failed_op_uuid,
+        StringifyNetName(name), num_iter, allow_fail)
 
 
 def RunPlan(plan_or_step):
@@ -240,7 +259,7 @@ def FeedBlob(name, arr, device_option=None):
     """
     if type(arr) is caffe2_pb2.TensorProto:
         arr = utils.Caffe2TensorToNumpyArray(arr)
-    if type(arr) is np.ndarray and arr.dtype.kind == 'S':
+    if type(arr) is np.ndarray and arr.dtype.kind in 'SU':
         # Plain NumPy strings are weird, let's use objects instead
         arr = arr.astype(np.object)
 
@@ -435,11 +454,12 @@ def FeedImmediate(*args, **kwargs):
 
 # CWorkspace utilities
 
-def _Workspace_create_net(ws, net, overwrite=False):
-    return ws._create_net(StringifyProto(net), overwrite)
+def _Workspace_create_net_with_exception_intercept(ws, net, overwrite=False):
+    return CallWithExceptionIntercept(
+        ws._create_net, ws.last_failed_op_uuid, StringifyProto(net), overwrite)
 
 
-C.Workspace.create_net = _Workspace_create_net
+C.Workspace.create_net = _Workspace_create_net_with_exception_intercept
 
 
 def _Workspace_run(ws, obj):
@@ -455,7 +475,12 @@ def _Workspace_run(ws, obj):
         "Don't know how to do Workspace.run() on {}".format(type(obj)))
 
 
-C.Workspace.run = _Workspace_run
+def _Workspace_run_with_exception_intercept(ws, obj):
+    return CallWithExceptionIntercept(
+        _Workspace_run, ws.last_failed_op_uuid, ws, obj)
+
+
+C.Workspace.run = _Workspace_run_with_exception_intercept
 
 
 def _Blob_feed(blob, arg, device_option=None):

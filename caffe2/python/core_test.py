@@ -1,9 +1,22 @@
+from __future__ import unicode_literals
+
+from inspect import currentframe, getframeinfo
 import unittest
 
+from future.utils import bytes_to_native_str
 import numpy as np
+
 from caffe2.proto import caffe2_pb2
 from caffe2.python import core, workspace, test_util
 
+
+def _remove_uuid(proto):
+    if isinstance(proto, caffe2_pb2.NetDef):
+        for op in proto.op:
+            op.ClearField(bytes_to_native_str(b'uuid'))
+    elif isinstance(proto, caffe2_pb2.OperatorDef):
+        proto.ClearField(bytes_to_native_str(b'uuid'))
+    return proto
 
 class TestScopes(test_util.TestCase):
     def testBlobReferenceIsIndependentFromNameScope(self):
@@ -217,7 +230,7 @@ class TestCreateOperator(test_util.TestCase):
         self.assertEqual(op.arg[1].name, "arg2")
         self.assertEqual(op.arg[2].name, "arg3")
         self.assertEqual(op.arg[0].i, 1)
-        self.assertEqual(op.arg[1].s, "2")
+        self.assertEqual(op.arg[1].s, b"2")
         self.assertEqual(list(op.arg[2].ints), [1, 2, 3])
 
     def testCreateWithNoneKwarg(self):
@@ -242,7 +255,8 @@ class TestAutoNaming(test_util.TestCase):
         net_a = create_net()
         net_b = create_net()
         # created net proto is predicatable.
-        self.assertEqual(net_a.Proto().op, net_b.Proto().op)
+        self.assertEqual(_remove_uuid(net_a.Proto()).op,
+                         _remove_uuid(net_b.Proto()).op)
         self.assertEqual(net_a.Proto().op[0].output[0], 'foo/ab')
         self.assertEqual(net_a.Proto().op[1].output[0], 'cd')
 
@@ -316,6 +330,320 @@ class TestAppendNet(test_util.TestCase):
         netB.Sum(["in3", "in4"], ["in1"])
         netA.AppendNet(netB)  # note different order than in prev test
         self.assertTrue("in1" in netA.external_inputs)
+
+
+class TestExtractPredictorNet(test_util.TestCase):
+
+    def test_extract_simple(self):
+        from caffe2.python import brew
+        from caffe2.python.model_helper import ModelHelper, ExtractPredictorNet
+
+        model = ModelHelper(name="test", arg_scope={'order': 'NCHW'})
+        [data, label] = brew.image_input(
+            model,
+            "reader", ["xx/data", "label"],
+        )
+        cnv = brew.conv(model, data, 'cnv', 32, 32, 4)
+        a = brew.fc(model, cnv, 'a', 100, 200)
+        pred = brew.fc(model, a, 'pred', 200, 5)
+        brew.softmax(model, [pred, label], "softmax")
+
+        (predict_net, export_blobs) = ExtractPredictorNet(
+            net_proto=model.net.Proto(),
+            input_blobs=["xx/data"],
+            output_blobs=["pred"],
+            renames={"xx/data": "image"},
+        )
+        export_blobs = set(export_blobs)
+
+        ops = list(predict_net.Proto().op)
+        for op in ops:
+            self.assertFalse(op.type == "Softmax")
+            self.assertFalse("xx/data" in op.input)
+
+        # Note: image input should not be included
+        self.assertEquals(ops[0].type, "Conv")
+        self.assertEquals(ops[1].type, "FC")
+        self.assertEquals(ops[2].type, "FC")
+        self.assertEquals(len(ops), 3)
+
+        # test rename happened
+        self.assertEquals(ops[0].input[0], "image")
+
+        # Check export blobs
+        self.assertTrue("image" not in export_blobs)
+        self.assertTrue("xx/data" not in export_blobs)
+        self.assertEqual(set([str(p) for p in model.params]), export_blobs)
+
+        # Check external inputs/outputs
+        self.assertTrue("image" in predict_net.Proto().external_input)
+        self.assertEquals(set(["pred"]), set(predict_net.Proto().external_output))
+        self.assertEqual(
+            set(predict_net.Proto().external_input) -
+            set([str(p) for p in model.params]), set(["image"])
+        )
+
+
+class TestOperatorTraceback(test_util.TestCase):
+    def test_operator_constructor_traceback(self):
+        net = core.Net("test")
+        a, b = net.AddExternalInput("a", "b")
+        net.Mul([a, b], "c")
+        with self.assertRaises(Exception):
+            workspace.RunNetOnce(net)
+        with self.assertRaises(Exception):
+            workspace.CreateNet(net)
+
+    def test_operator_runtime_traceback(self):
+        net = core.Net("test")
+        a = net.AddExternalInput("a")
+        workspace.blobs[a] = np.array([1, 2, 3], dtype=np.float32)
+        net.Split(a, ["b", "c"], axis=0)
+        with self.assertRaises(Exception):
+            workspace.RunNetOnce(net)
+        workspace.CreateNet(net)
+        with self.assertRaises(Exception):
+            workspace.RunNet(net)
+
+    def test_name_population(self):
+        net = core.Net("test")
+        # capture line number on which operator is added
+        net.Mul(["a", "b"], "c"); cf = currentframe(); line = cf.f_lineno
+        net.PopulateProtoWithFileName()
+        print(net.Proto())
+        filename = getframeinfo(cf).filename
+        self.assertEqual(net.Proto().op[0].name, '{}:{}'.format(filename, line))
+
+    def test_c_workspace_constructor(self):
+        net = core.Net("test")
+        a, b = net.AddExternalInput("a", "b")
+        net.Mul([a, b], "c"); cf = currentframe(); line = cf.f_lineno
+        ws = workspace.C.Workspace()
+        with self.assertRaises(Exception):
+            ws.run(net)
+        with self.assertRaises(Exception):
+            ws.create_net(net)
+        net.PopulateProtoWithFileName()
+        filename = getframeinfo(cf).filename
+        self.assertEqual(net.Proto().op[0].name, '{}:{}'.format(filename, line))
+
+    def test_c_workspace_runtime(self):
+        net = core.Net("test")
+        a = net.AddExternalInput("a")
+        net.Split(a, ["b", "c"], axis=0); cf = currentframe(); line = cf.f_lineno
+        ws = workspace.C.Workspace()
+        ws.create_blob(str(a)).feed(np.array([1, 2, 3], dtype=np.float32))
+        ws.create_net(net)
+        with self.assertRaises(Exception):
+            ws.run(net)
+        net.PopulateProtoWithFileName()
+        filename = getframeinfo(cf).filename
+        self.assertEqual(net.Proto().op[0].name, '{}:{}'.format(filename, line))
+
+
+class TestInferDevice(test_util.TestCase):
+
+    def setUp(self):
+        device_option = caffe2_pb2.DeviceOption()
+        device_option.device_type = caffe2_pb2.CUDA
+        device_option.cuda_gpu_id = 1
+        self.cuda_option = device_option
+        self.cpu_option = caffe2_pb2.DeviceOption()
+
+    def _test_op(
+        self,
+        op_name,
+        in_option,
+        out_option,
+        op_option=None,
+        inputs=None,
+        outputs=None
+    ):
+        op_option = self.cuda_option if not op_option else op_option
+        inputs = ["blob_1"] if not inputs else inputs
+        outputs = ["blob_2"] if not outputs else outputs
+        with core.DeviceScope(op_option):
+            op = core.CreateOperator(op_name, inputs, outputs)
+        input_dev, output_dev = core.InferOpBlobDevices(op)
+        for in_dev in input_dev:
+            self.assertEqual(in_dev, in_option)
+        for out_dev in output_dev:
+            self.assertEqual(out_dev, out_option)
+
+    def test_infer_device(self):
+        self._test_op(
+            "FC",
+            self.cuda_option,
+            self.cuda_option,
+            op_option=self.cuda_option,
+            inputs=["data", "fc_w", "fc_b"],
+            outputs=["fc_1"]
+        )
+
+    def test_infer_device_cross_device(self):
+        self._test_op("CopyGPUToCPU", self.cuda_option, self.cpu_option)
+        self._test_op("CopyCPUToGPU", self.cpu_option, self.cuda_option)
+        self._test_op("EnsureCPUOutput", self.cuda_option, self.cpu_option)
+        self._test_op("CopyFromCPUInput", self.cpu_option, self.cuda_option)
+        self._test_op(
+            "EnsureCPUOutput",
+            self.cpu_option,
+            self.cpu_option,
+            op_option=self.cpu_option
+        )
+        self._test_op(
+            "CopyFromCPUInput",
+            self.cpu_option,
+            self.cpu_option,
+            op_option=self.cpu_option
+        )
+
+    def test_inject_copy(self):
+        net = core.Net("test")
+        init_net = core.Net("init")
+        device_option = caffe2_pb2.DeviceOption()
+        device_option.device_type = caffe2_pb2.CUDA
+        device_option.cuda_gpu_id = 1
+        weight = init_net.XavierFill([], 'fc_w', shape=[10, 100])
+        bias = init_net.ConstantFill([], 'fc_b', shape=[10, ])
+
+        with core.DeviceScope(device_option):
+            net.FC(["data", weight, bias], "fc1")
+
+        _, blob_to_device = core.InjectCrossDeviceCopies(init_net)
+        new_net, blob_to_device = core.InjectCrossDeviceCopies(
+            net, blob_to_device
+        )
+        op = new_net._net.op[-1]
+        self.assertEqual(op.type, "FC")
+        self.assertEqual(op.input[0], "data_cuda_1")
+        self.assertEqual(op.input[1], "fc_w_cuda_1")
+        self.assertEqual(op.input[2], "fc_b_cuda_1")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        self.assertEqual(new_net._net.op[-2].type, "CopyCPUToGPU")
+        self.assertEqual(new_net._net.op[0].type, "CopyCPUToGPU")
+        self.assertNotEqual(blob_to_device["fc_w"], device_option)
+
+    def test_cross_nets(self):
+        net = core.Net("test")
+        init_net = core.Net("init")
+        device_option = caffe2_pb2.DeviceOption()
+        device_option.device_type = caffe2_pb2.CUDA
+        device_option.cuda_gpu_id = 1
+        weight = init_net.XavierFill([], 'fc_w', shape=[10, 100])
+        bias = init_net.ConstantFill([], 'fc_b', shape=[10, ])
+
+        with core.DeviceScope(device_option):
+            net.FC(["data", weight, bias], "fc1")
+
+        data_remap = {'data': device_option}
+        nets, _ = core.InjectDeviceCopiesAmongNets(
+            [init_net, net], blob_to_device_init=data_remap
+        )
+        op = nets[1]._net.op[0]
+        self.assertEqual(op.type, "CopyCPUToGPU")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        self.assertEqual(op.output[0], "fc_w_cuda_1")
+        op = nets[1]._net.op[1]
+        self.assertEqual(op.type, "CopyCPUToGPU")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        self.assertEqual(op.output[0], "fc_b_cuda_1")
+        op = nets[1]._net.op[2]
+        self.assertEqual(op.type, "FC")
+        self.assertEqual(op.input[0], "data")
+        self.assertEqual(op.input[1], "fc_w_cuda_1")
+        self.assertEqual(op.input[2], "fc_b_cuda_1")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+
+    def test_cross_nets_no_change(self):
+        net = core.Net("test")
+        init_net = core.Net("init")
+        device_option = caffe2_pb2.DeviceOption()
+        device_option.device_type = caffe2_pb2.CUDA
+        device_option.cuda_gpu_id = 1
+
+        with core.DeviceScope(device_option):
+            weight = init_net.XavierFill([], 'fc_w', shape=[10, 100])
+            bias = init_net.ConstantFill([], 'fc_b', shape=[10, ])
+            net.FC(["data", weight, bias], "fc1")
+
+        data_remap = {'data': device_option}
+        nets = core.InjectDeviceCopiesAmongNetsWithoutB2D(
+            [init_net, net], blob_to_device_init=data_remap
+        )
+        op = nets[1]._net.op[0]
+        self.assertEqual(op.type, "FC")
+        self.assertEqual(op.input[0], "data")
+        self.assertEqual(op.input[1], "fc_w")
+        self.assertEqual(op.input[2], "fc_b")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+
+    def test_inject_copy_multi_use(self):
+        net = core.Net("test")
+        device_option = caffe2_pb2.DeviceOption()
+        device_option.device_type = caffe2_pb2.CUDA
+        device_option.cuda_gpu_id = 1
+
+        with core.DeviceScope(device_option):
+            net.Relu("data", "relu1")
+        net.Relu("data", "relu2")
+        with core.DeviceScope(device_option):
+            net.Relu("data", "relu3")
+        net.Relu("data", "relu4")
+        device_option.cuda_gpu_id = 0
+        with core.DeviceScope(device_option):
+            net.Relu("data", "relu5")
+        device_option.cuda_gpu_id = 1
+        with core.DeviceScope(device_option):
+            net.Relu("data", "relu6")
+
+        new_net, _ = core.InjectCrossDeviceCopies(net)
+        op = new_net._net.op[0]
+        self.assertEqual(op.type, "CopyCPUToGPU")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        self.assertEqual(op.output[0], "data_cuda_1")
+        op = new_net._net.op[1]
+        self.assertEqual(op.type, "Relu")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        self.assertEqual(op.output[0], "relu1")
+        op = new_net._net.op[2]
+        self.assertEqual(op.type, "Relu")
+        self.assertEqual(op.device_option.device_type, 0)
+        self.assertEqual(op.output[0], "relu2")
+        op = new_net._net.op[3]
+        self.assertEqual(op.type, "Relu")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        self.assertEqual(op.input[0], "data_cuda_1")
+        self.assertEqual(op.output[0], "relu3")
+        op = new_net._net.op[4]
+        self.assertEqual(op.type, "Relu")
+        self.assertEqual(op.device_option.device_type, 0)
+        self.assertEqual(op.output[0], "relu4")
+        op = new_net._net.op[5]
+        self.assertEqual(op.type, "CopyCPUToGPU")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 0)
+        self.assertEqual(op.output[0], "data_cuda_0")
+        op = new_net._net.op[6]
+        self.assertEqual(op.type, "Relu")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 0)
+        self.assertEqual(op.input[0], "data_cuda_0")
+        self.assertEqual(op.output[0], "relu5")
+        op = new_net._net.op[7]
+        self.assertEqual(op.type, "Relu")
+        self.assertEqual(op.device_option.device_type, 1)
+        self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        self.assertEqual(op.input[0], "data_cuda_1")
+        self.assertEqual(op.output[0], "relu6")
 
 
 if __name__ == '__main__':

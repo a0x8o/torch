@@ -7,15 +7,17 @@ from __future__ import unicode_literals
 
 import contextlib
 import threading
+try:
+    from past.builtins import basestring
+except ImportError:
+    print("You don't have the past package installed. ",
+          "This is necessary for python 2/3 compatibility. ",
+          "To do this, do 'pip install future'.")
+    import sys
+    sys.exit(1)
 
 from caffe2.proto import caffe2_pb2
 
-# Python 2 and 3 compatibility: test if basestring exists
-try:
-    basestring  # NOQA
-except NameError:
-    # This is python3 so we define basestring.
-    basestring = str
 
 # The name scope and device scope when creating a new operator.
 _NAMESCOPE_SEPARATOR = '/'

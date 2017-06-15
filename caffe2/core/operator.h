@@ -11,13 +11,14 @@
 #include "caffe2/core/blob.h"
 #include "caffe2/core/common.h"
 #include "caffe2/core/net.h"
+#include "caffe2/core/observer.h"
 #include "caffe2/core/operator_gradient.h"
 #include "caffe2/core/operator_schema.h"
 #include "caffe2/core/registry.h"
 #include "caffe2/core/tensor.h"
 #include "caffe2/core/workspace.h"
-#include "caffe2/utils/proto_utils.h"
 #include "caffe2/proto/caffe2.pb.h"
+#include "caffe2/utils/proto_utils.h"
 
 namespace caffe2 {
 
@@ -128,6 +129,28 @@ class OperatorBase {
     return arg_helper_;
   }
 
+  void SetObserver(ObserverBase<OperatorBase>* observer) {
+    observer_ = observer;
+  }
+
+  void RemoveObserver() {
+    observer_ = nullptr;
+  }
+
+  void RecordLastFailedUuid() {
+    if (this->def().has_uuid()) {
+      auto uuid = this->def().uuid();
+      VLOG(1) << "Operator with uuid " << uuid << " failed";
+      operator_ws_->last_failed_op_uuid = uuid;
+    } else {
+      VLOG(1) << "Failed operator doesn't have uuid set";
+    }
+  }
+
+ protected:
+  ObserverBase<OperatorBase>* observer_ = nullptr;
+  Workspace* operator_ws_;
+
  private:
   OperatorDef operator_def_;
   ArgumentHelper arg_helper_;
@@ -178,12 +201,12 @@ class Operator : public OperatorBase {
     // constructors will run on that device.
     context_.SwitchToDevice(0);
   }
-  virtual ~Operator() noexcept {}
+  ~Operator() noexcept override {}
 
   inline const Tensor<Context>& Input(int idx) {
     return OperatorBase::template Input<Tensor<Context> >(idx); }
   inline Tensor<Context>* Output(int idx) {
-    return OperatorBase::template Output<Tensor<Context> >(idx);
+    return OperatorBase::template Output<Tensor<Context>>(idx);
   }
 
   // The run function of Operator switches to the device, and then carries out
@@ -191,9 +214,16 @@ class Operator : public OperatorBase {
   // instead of Run().
   bool Run(int stream_id = 0) final {
     try {
+      if (observer_) {
+        observer_->Start();
+      }
       context_.SwitchToDevice(stream_id);
       bool started = RunOnDevice();
       bool finished = context_.FinishDeviceComputation();
+      auto result = started && finished;
+      if (!result) {
+        this->RecordLastFailedUuid();
+      }
       if (!finished) {
         // FinishDeviceComputation() returning error basically means that there
         // is something wrong with the device (like CUDA) that usually cannot be
@@ -201,10 +231,17 @@ class Operator : public OperatorBase {
         LOG(FATAL) << "Computation on device returned error in operator\n"
                    << ProtoDebugString(this->def());
       }
-      return (started && finished);
+      if (observer_) {
+        observer_->Stop();
+      }
+      return result;
     } catch (EnforceNotMet& err) {
       err.AppendMessage("Error from operator: \n" + ProtoDebugString(def()));
       AddRelatedBlobInfo(&err);
+      this->RecordLastFailedUuid();
+      throw;
+    } catch (...) {
+      this->RecordLastFailedUuid();
       throw;
     }
   }
@@ -212,10 +249,18 @@ class Operator : public OperatorBase {
   bool RunAsync(int stream_id = 0) final {
     try {
       context_.SwitchToDevice(stream_id);
-      return RunOnDevice();
+      auto result = RunOnDevice();
+      if (!result) {
+        this->RecordLastFailedUuid();
+      }
+      return result;
     } catch (EnforceNotMet& err) {
       err.AppendMessage("Error from operator: \n" + ProtoDebugString(def()));
       AddRelatedBlobInfo(&err);
+      this->RecordLastFailedUuid();
+      throw;
+    } catch (...) {
+      this->RecordLastFailedUuid();
       throw;
     }
   }
@@ -341,6 +386,10 @@ struct DispatchHelper<FixedValues<>, ExtraArgs...> {
     static bool call(Op* op, const Tensor<Context>& tensor) {                  \
       return call<Op>(op, tensor.meta());                                      \
     }                                                                          \
+    template <typename Op>                                                     \
+    static bool call(Op* op, const Blob& blob) {                               \
+      return call<Op>(op, blob.meta());                                        \
+    }                                                                          \
   };                                                                           \
                                                                                \
   template <typename... ExtraArgs>                                             \
@@ -352,6 +401,10 @@ struct DispatchHelper<FixedValues<>, ExtraArgs...> {
     template <typename Op, typename Context>                                   \
     static bool call(Op* op, const Tensor<Context>& tensor) {                  \
       return call<Op>(op, tensor.meta());                                      \
+    }                                                                          \
+    template <typename Op>                                                     \
+    static bool call(Op* op, const Blob& blob) {                               \
+      return call<Op>(op, blob.meta());                                        \
     }                                                                          \
   };                                                                           \
                                                                                \
@@ -366,6 +419,10 @@ struct DispatchHelper<FixedValues<>, ExtraArgs...> {
     template <typename Op, typename Context>                                   \
     static bool call(Op* op, const Tensor<Context>& tensor) {                  \
       return call<Op>(op, tensor.meta());                                      \
+    }                                                                          \
+    template <typename Op>                                                     \
+    static bool call(Op* op, const Blob& blob) {                               \
+      return call<Op>(op, blob.meta());                                        \
     }                                                                          \
   };
 CAFFE2_DEFINE_TENSOR_TYPES_DISPATCHER(

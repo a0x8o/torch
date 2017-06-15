@@ -12,9 +12,9 @@
 #include "caffe2/core/blob.h"
 #include "caffe2/core/common.h"
 #include "caffe2/core/logging.h"
-#include "caffe2/core/registry.h"
+#include "caffe2/core/observer.h"
 #include "caffe2/core/operator_schema.h"
-
+#include "caffe2/core/registry.h"
 #include "caffe2/core/tensor.h"
 #include "caffe2/core/workspace.h"
 #include "caffe2/proto/caffe2.pb.h"
@@ -66,7 +66,6 @@ class NetBase {
   vector<string> external_input_;
   vector<string> external_output_;
   string name_;
-
   DISABLE_COPY_AND_ASSIGN(NetBase);
 };
 
@@ -98,8 +97,31 @@ class SimpleNet : public NetBase {
       const int main_runs,
       const bool run_individual) override;
 
+  /*
+   * This returns a list of pointers to objects stored in unique_ptrs. Used to
+   * init Observers.
+   *
+   * Think carefully before using.
+   */
+  vector<OperatorBase*> getOperators() const {
+    vector<OperatorBase*> op_list;
+    for (auto& op : operators_) {
+      op_list.push_back(op.get());
+    }
+    return op_list;
+  }
+
+  void SetObserver(ObserverBase<SimpleNet>* observer) {
+    observer_ = observer;
+  }
+
+  void RemoveObserver() {
+    observer_ = nullptr;
+  }
+
  protected:
   vector<unique_ptr<OperatorBase> > operators_;
+  ObserverBase<SimpleNet>* observer_ = nullptr;
 
   DISABLE_COPY_AND_ASSIGN(SimpleNet);
 };
@@ -125,7 +147,7 @@ class DAGNetBase : public NetBase {
  public:
   using ExecutionChains = std::unordered_map<int, std::vector<int>>;
   DAGNetBase(const NetDef& net_def, Workspace* ws);
-  ~DAGNetBase();
+  ~DAGNetBase() override;
   bool Run() override;
   // WorkerFunction() is a function wrapper to allow us to run worker threads.
   // It checks out one ready-to-run operator from the job queue, runs it,
@@ -147,12 +169,14 @@ class DAGNetBase : public NetBase {
   vector<internal::OperatorNode> operator_nodes_;
   ExecutionChains execution_chains_;
   vector<int> initial_frontier_;
-  SimpleQueue<int> job_queue_;
+  std::unique_ptr<SimpleQueue<int>> job_queue_;
   std::vector<std::thread> workers_;
   int num_workers_;
+  int num_workers_first_iteration_;
   int remaining_ops_;
 
   bool success_;
+  int iter_;
   std::mutex remaining_ops_mutex_;
   std::condition_variable cv_;
   std::mutex run_in_progress_;

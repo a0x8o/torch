@@ -9,7 +9,7 @@ This defines a columnar storage format for such datasets on top of caffe2
 tensors. In terms of capacity of representation, it can represent most of
 the data types supported by Parquet, ORC, DWRF file formats.
 
-See comments in operator_test/dataset_ops_test.py for a example and
+See comments in operator_test/dataset_ops_test.py for an example and
 walkthrough on how to use schema to store and iterate through a structured
 in-memory dataset.
 """
@@ -24,6 +24,14 @@ from caffe2.python import core
 from caffe2.python import workspace
 from caffe2.python.core import BlobReference
 from collections import OrderedDict, namedtuple
+try:
+    from past.builtins import basestring
+except ImportError:
+    print("You don't have the past package installed. ",
+          "This is necessary for python 2/3 compatibility. ",
+          "To do this, do 'pip install future'.")
+    import sys
+    sys.exit(1)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -74,12 +82,12 @@ class Metadata(
     Usually makes sense for length fields of lists.
 
     `feature_specs` - information about the features that contained in this
-    field. For example if field have more then 1 feature it can have list of
+    field. For example if field have more than 1 feature it can have list of
     feature names contained in this field."""
     __slots__ = ()
 
 
-Metadata.__new__.__defaults__ = (None, None, None, None)
+Metadata.__new__.__defaults__ = (None, None, None)
 
 
 class Field(object):
@@ -284,6 +292,8 @@ class Struct(Field):
         fields = [(name, _normalize_field(field)) for name, field in fields]
         self.fields = OrderedDict()
         for name, field in fields:
+            # if name == 'dense':
+            #     import pdb; pdb.set_trace()
             if FIELD_SEPARATOR in name:
                 name, field = self._struct_from_nested_name(name, field)
             if name not in self.fields:
@@ -603,7 +613,7 @@ class Scalar(Field):
                 "on newly created Scalar with unsafe=True. This will become an "
                 "error soon."
             )
-        if blob is not None and isinstance(blob, core.basestring):
+        if blob is not None and isinstance(blob, basestring):
             raise ValueError(
                 'Passing str blob to Scalar.set() is ambiguous. '
                 'Do either set(blob=np.array(blob)) or '
@@ -614,7 +624,7 @@ class Scalar(Field):
         if dtype is not None:
             dtype = np.dtype(dtype)
         # If blob is not None and it is not a BlobReference, we assume that
-        # it is actual tensor data, so we will try to cast it to an numpy array.
+        # it is actual tensor data, so we will try to cast it to a numpy array.
         if blob is not None and not isinstance(blob, BlobReference):
             preserve_shape = isinstance(blob, np.ndarray)
             if dtype is not None and dtype != np.void:
@@ -744,7 +754,6 @@ class _SchemaNode(object):
         self.children = []
         self.type_str = type_str
         self.field = None
-        self.col_blob = None
 
     def add_child(self, name, type_str=''):
         for child in self.children:
@@ -770,22 +779,27 @@ class _SchemaNode(object):
         if (set(child_names) == set(list_names)):
             for child in self.children:
                 if child.name == 'values':
-                    self.field = List(
-                        child.get_field(),
-                        lengths_blob=self.children[0].col_blob
-                    )
-                    self.type_str = "List"
-                    return self.field
+                    values_field = child.get_field()
+                else:
+                    lengths_field = child.get_field()
+            self.field = List(
+                values_field,
+                lengths_blob=lengths_field
+            )
+            self.type_str = "List"
+            return self.field
         elif (set(child_names) == set(map_names)):
             for child in self.children:
                 if child.name == 'keys':
                     key_field = child.get_field()
                 elif child.name == 'values':
                     values_field = child.get_field()
+                else:
+                    lengths_field = child.get_field()
             self.field = Map(
                 key_field,
                 values_field,
-                lengths_blob=self.children[0].col_blob
+                lengths_blob=lengths_field
             )
             self.type_str = "Map"
             return self.field
@@ -793,10 +807,7 @@ class _SchemaNode(object):
         else:
             struct_fields = []
             for child in self.children:
-                if child.field is not None:
-                    struct_fields.append((child.name, child.field))
-                else:
-                    struct_fields.append((child.name, child.get_field()))
+                struct_fields.append((child.name, child.get_field()))
 
             self.field = Struct(*struct_fields)
             self.type_str = "Struct"
@@ -852,7 +863,6 @@ def from_column_list(
             next = current.add_child(name, type_str)
             if field is not None:
                 next.field = field
-                next.col_blob = col_blob
             current = next
 
     return root.get_field()
@@ -881,7 +891,7 @@ def as_record(value):
         return value
     elif isinstance(value, list) or isinstance(value, tuple):
         is_field_list = all(
-            f is tuple and len(f) == 2 and isinstance(f[0], core.basestring)
+            f is tuple and len(f) == 2 and isinstance(f[0], basestring)
             for f in value
         )
         if is_field_list:

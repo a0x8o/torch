@@ -506,9 +506,11 @@ class Task(object):
 
     def get_step(self):
         if self._step is not None and self._step_with_setup is None:
-            report_steps = filter(
-                lambda s: not hasattr(s, '_report_step_used'),
-                self._step.get_all_attributes(Task.REPORT_STEP))
+            report_steps = [
+                s
+                for s in self._step.get_all_attributes(Task.REPORT_STEP)
+                if not hasattr(s, '_report_step_used')
+            ]
             for step in report_steps:
                 step._report_step_used = True
                 if not step.Proto().run_every_ms:
@@ -522,7 +524,7 @@ class Task(object):
                 exit_nets.append(output_net)
 
             body = self._step if not report_steps else core.execution_step(
-                '%s:body', report_steps + [self._step])
+                '%s:body' % self.name, report_steps + [self._step])
             self._step_with_setup = core.execution_step(
                 self.name,
                 [
@@ -565,11 +567,11 @@ class SetupNets(object):
     In order to have `init_net` run once before `net` runs for the
     first time, you can do one of the following:
 
-        net.add_object(Task.TASK_SETUP, SetupNets([init_net]))
+        net.add_attribute(Task.TASK_SETUP, SetupNets([init_net]))
 
     or
 
-        net.add_object(TaskGroup.LOCAL_SETUP, SetupNets([init_net]))
+        net.add_attribute(TaskGroup.LOCAL_SETUP, SetupNets([init_net]))
 
     - With Task.TASK_SETUP, init_net will run once at my_task startup.
     - With TaskGroup.LOCAL_SETUP, init_net will run once on node 'trainer',

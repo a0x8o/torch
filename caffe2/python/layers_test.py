@@ -6,7 +6,6 @@ from __future__ import unicode_literals
 import hypothesis.strategies as st
 import numpy as np
 import numpy.testing as npt
-
 from hypothesis import given
 
 import caffe2.python.hypothesis_test_util as hu
@@ -196,6 +195,87 @@ class TestLayers(LayersTestCase):
         ), loss)
 
     @given(
+        X=hu.arrays(dims=[2, 5]),
+    )
+    def testBatchNormalization(self, X):
+        input_record = self.new_record(schema.Scalar((np.float32, (5,))))
+        schema.FeedRecord(input_record, [X])
+        bn_output = self.model.BatchNormalization(input_record)
+        self.assertEqual(schema.Scalar((np.float32, (5,))), bn_output)
+        self.model.output_schema = schema.Struct()
+
+        train_init_net, train_net = self.get_training_nets()
+
+        init_ops = self.assertNetContainOps(
+            train_init_net,
+            [
+                OpSpec("ConstantFill", None, None),
+                OpSpec("ConstantFill", None, None),
+                OpSpec("ConstantFill", None, None),
+                OpSpec("ConstantFill", None, None),
+            ]
+        )
+
+        input_blob = input_record.field_blobs()[0]
+        output_blob = bn_output.field_blobs()[0]
+
+        expand_dims_spec = OpSpec(
+            "ExpandDims",
+            [input_blob],
+            [input_blob],
+        )
+
+        train_bn_spec = OpSpec(
+            "SpatialBN",
+            [input_blob, init_ops[0].output[0], init_ops[1].output[0],
+                init_ops[2].output[0], init_ops[3].output[0]],
+            [output_blob, init_ops[2].output[0], init_ops[3].output[0], None, None],
+            {'is_test': 0, 'order': 'NCHW', 'momentum': 0.9},
+        )
+
+        test_bn_spec = OpSpec(
+            "SpatialBN",
+            [input_blob, init_ops[0].output[0], init_ops[1].output[0],
+                init_ops[2].output[0], init_ops[3].output[0]],
+            [output_blob],
+            {'is_test': 1, 'order': 'NCHW', 'momentum': 0.9},
+        )
+
+        squeeze_spec = OpSpec(
+            "Squeeze",
+            [output_blob],
+            [output_blob],
+        )
+
+        self.assertNetContainOps(
+            train_net,
+            [expand_dims_spec, train_bn_spec, squeeze_spec]
+        )
+
+        eval_net = self.get_eval_net()
+
+        self.assertNetContainOps(
+            eval_net,
+            [expand_dims_spec, test_bn_spec, squeeze_spec]
+        )
+
+        predict_net = self.get_predict_net()
+
+        self.assertNetContainOps(
+            predict_net,
+            [expand_dims_spec, test_bn_spec, squeeze_spec]
+        )
+
+        workspace.RunNetOnce(train_init_net)
+        workspace.RunNetOnce(train_net)
+
+        schema.FeedRecord(input_record, [X])
+        workspace.RunNetOnce(eval_net)
+
+        schema.FeedRecord(input_record, [X])
+        workspace.RunNetOnce(predict_net)
+
+    @given(
         X=hu.arrays(dims=[5, 2]),
         num_to_collect=st.integers(min_value=1, max_value=10),
     )
@@ -231,11 +311,11 @@ class TestLayers(LayersTestCase):
 
     def testGatherRecord(self):
         indices = np.array([1, 3, 4], dtype=np.int32)
-        dense = np.array(range(20), dtype=np.float32).reshape(10, 2)
-        lengths = np.array(range(10), dtype=np.int32)
-        items = np.array(range(lengths.sum()), dtype=np.int64)
-        items_lengths = np.array(range(lengths.sum()), dtype=np.int32)
-        items_items = np.array(range(items_lengths.sum()), dtype=np.int64)
+        dense = np.array(list(range(20)), dtype=np.float32).reshape(10, 2)
+        lengths = np.array(list(range(10)), dtype=np.int32)
+        items = np.array(list(range(lengths.sum())), dtype=np.int64)
+        items_lengths = np.array(list(range(lengths.sum())), dtype=np.int32)
+        items_items = np.array(list(range(items_lengths.sum())), dtype=np.int64)
         record = self.new_record(schema.Struct(
             ('dense', schema.Scalar(np.float32)),
             ('sparse', schema.Struct(
