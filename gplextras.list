@@ -1,0 +1,4 @@
+# Packages for Cloudera's GPLExtras, Version 5, on Ubuntu 12.04 amd64       
+deb [arch=amd64] http://archive.cloudera.com/gplextras5/ubuntu/precise/amd64/gplextras precise-gplextras5 contrib
+deb-src http://archive.cloudera.com/gplextras5/ubuntu/precise/amd64/gplextras precise-gplextras5 contrib
+
