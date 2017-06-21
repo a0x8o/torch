@@ -135,6 +135,7 @@ class LayerModelHelper(model_helper.ModelHelper):
         self._layers.append(layer)
         for param in layer.get_parameters():
             assert isinstance(param.parameter, core.BlobReference)
+
             self.param_to_optim[str(param.parameter)] = \
                 param.optimizer or self.default_optimizer
 

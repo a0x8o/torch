@@ -21,9 +21,8 @@ from caffe2.python import scope, utils, workspace
 import caffe2.python._import_c_extension as C
 import pickle
 import numpy as np
-import uuid
-import traceback
 import sys
+
 
 # Mac os specific message
 if (sys.platform == 'darwin' and 'leveldb' in C.registered_dbs()):
@@ -319,18 +318,7 @@ def CreateOperator(
     # Add all other arguments
     for key, value in kwargs.items():
         operator.arg.add().CopyFrom(utils.MakeArgument(key, value))
-    operator.uuid = uuid.uuid4().int >> 64
-    stack = traceback.extract_stack()
 
-    # string part of the stack that belongs to this file
-
-    for i, line in reversed(list(enumerate(stack))):
-        # get path of the core.py file
-        name = __name__.replace('.', '/') + ".py"
-        if name not in ' '.join(map(str, line)):
-            break
-
-    workspace.operator_tracebacks[operator.uuid] = stack[:i + 1]
     if workspace.IsImmediate():
         workspace.RunOperatorImmediate(operator)
     return operator
@@ -1200,12 +1188,14 @@ def _get_blob_ref(blob_name_or_ref):
 
 def _recover_record_by_prefix(names, prefix=''):
     """
-        Tries to recover record by taking a subset of blob names with
-        a given prefix name and interpreting them as schema column names
-        """
+    Tries to recover record by taking a subset of blob names with
+    a given prefix name and interpreting them as schema column names
+    """
     from caffe2.python import schema
     column_names = [name[len(prefix):] for name in names
                     if name.startswith(prefix)]
+    if not column_names:
+        return None
     return schema.from_column_list(
         column_names,
         col_blobs=[_get_blob_ref(prefix + name) for name in column_names])
@@ -1562,12 +1552,6 @@ class Net(object):
         self._InvalidateLookupTables()
         return self._net
 
-    def PopulateProtoWithFileName(self):
-        for op in self.Proto().op:
-            if op.uuid in workspace.operator_tracebacks:
-                tb = workspace.operator_tracebacks[op.uuid]
-                op.name = ':'.join(map(str, tb[-1][:2]))
-
     def NextScopedBlob(self, prefix='unnamed'):
         """Return the blob that has not been defined or registered in the
         current net. It returns `ScopedBlobReference(prefix)`, if it's valid,
@@ -1745,8 +1729,9 @@ class Net(object):
         Tries to recover input record by taking a subset of external_inputs with
         a given prefix name and interpreting them as schema column names
         """
-        self.set_input_record(_recover_record_by_prefix(
-            self._net.external_input, prefix))
+        record = _recover_record_by_prefix(self._net.external_input, prefix)
+        if record:
+            self.set_input_record(record)
 
     def set_output_record(self, record):
         assert self._output_record is None, (
@@ -1762,8 +1747,9 @@ class Net(object):
         Tries to recover out record by taking a subset of external_outputs with
         a given prefix name and interpreting them as schema column names
         """
-        self.set_output_record(_recover_record_by_prefix(
-            self._net.external_output, prefix))
+        record = _recover_record_by_prefix(self._net.external_output, prefix)
+        if record:
+            self.set_output_record(record)
 
     def AppendOutputRecordField(self, field_name, record):
         from caffe2.python import schema
@@ -2229,6 +2215,14 @@ class ExecutionStep(object):
         self._assert_can_mutate()
         self._step.num_iter = num_iter
 
+    def SetCreateWorkspace(self, create_workspace):
+        self._assert_can_mutate()
+        self._step.create_workspace = create_workspace
+
+    def SetNumConcurrentInstances(self, num_concurrent_instances):
+        self._assert_can_mutate()
+        self._step.num_concurrent_instances = num_concurrent_instances
+
     def SetOnlyOnce(self, only_once):
         self._assert_can_mutate()
         self._step.only_once = only_once
@@ -2382,7 +2376,9 @@ def execution_step(default_name,
                    report_interval=None,
                    concurrent_substeps=None,
                    should_stop_blob=None,
-                   only_once=None):
+                   only_once=None,
+                   num_concurrent_instances=None,
+                   create_workspace=False):
     """
     Helper for creating an ExecutionStep.
     - steps_or_nets can be:
@@ -2414,6 +2410,10 @@ def execution_step(default_name,
     if report_net is not None:
         assert report_interval is not None
         step.SetReportNet(report_net, report_interval)
+    if num_concurrent_instances is not None:
+        step.SetNumConcurrentInstances(num_concurrent_instances)
+    if create_workspace:
+        step.SetCreateWorkspace(True)
 
     if isinstance(steps_or_nets, ExecutionStep):
         step.AddSubstep(steps_or_nets)

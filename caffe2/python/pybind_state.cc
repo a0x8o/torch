@@ -250,7 +250,13 @@ PythonOpBase::PythonOpBase(
   }
 }
 
-PythonOpBase::~PythonOpBase() {}
+PythonOpBase::~PythonOpBase() {
+  if (built_func_) {
+    // since it may trigger python interpreter when refcount reaches zero
+    py::gil_scoped_acquire g;
+    built_func_.reset();
+  }
+}
 
 bool PythonOpBase::RunOnDevice() {
   std::vector<TensorCPU*> inputs;
@@ -540,12 +546,6 @@ void addObjectMethods(py::module& m) {
             CAFFE_ENFORCE(ParseProtobufFromLargeString(def, &proto));
             py::gil_scoped_release g;
             CAFFE_ENFORCE(self->RunPlan(proto));
-          })
-      .def(
-          "last_failed_op_uuid",
-          [](Workspace* self) {
-            CAFFE_ENFORCE(self);
-            return (uint64_t)self->last_failed_op_uuid;
           })
       .def_property_readonly_static("current", [](py::object /* type */) {
         auto ws = gWorkspaces.find(gCurrentWorkspaceName);
@@ -963,10 +963,7 @@ void addGlobalMethods(py::module& m) {
         gRegistery()[token] = Func{func, pass_workspace};
         return token;
       });
-  m.def("last_failed_op_uuid", []() {
-    CAFFE_ENFORCE(gWorkspace);
-    return (uint64_t)gWorkspace->last_failed_op_uuid;
-  });
+
   m.def(
       "register_python_gradient_op",
       [](const std::string& token, py::object func) {
