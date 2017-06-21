@@ -12,6 +12,7 @@ import numpy as np
 import random
 import six
 
+from caffe2.proto import caffe2_pb2
 from caffe2.python.attention import (
     AttentionType,
     apply_regular_attention,
@@ -707,7 +708,8 @@ class AttentionCell(RNNCell):
 
     def prepare_input(self, model, input_blob):
         if self.encoder_outputs_transposed is None:
-            self.encoder_outputs_transposed = model.Transpose(
+            self.encoder_outputs_transposed = brew.transpose(
+                model,
                 self.encoder_outputs,
                 self.scope('encoder_outputs_transposed'),
                 axes=[1, 2, 0],
@@ -1021,7 +1023,8 @@ class UnrolledCell(RNNCell):
                  scope.NameScope(scope_name):
                 timestep = model.param_init_net.ConstantFill(
                     [], "timestep", value=t, shape=[1],
-                    dtype=core.DataType.INT32)
+                    dtype=core.DataType.INT32,
+                    device_option=core.DeviceOption(caffe2_pb2.CPU))
                 states = self.cell._apply(
                     model=model,
                     input_t=split_inputs[t],

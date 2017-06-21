@@ -495,7 +495,6 @@ class RNNCellTest(hu.HypothesisTestCase):
             gradient_checker.NetGradientChecker.CompareNets(
                 nets, outputs, outputs_with_grad_ids=outputs_with_grad,
                 inputs_with_grads=[input_blob],
-                print_net_images=True,
             )
 
     @given(
@@ -532,7 +531,6 @@ class RNNCellTest(hu.HypothesisTestCase):
         gradient_checker.NetGradientChecker.CompareNets(
             nets, outputs, outputs_with_grads,
             inputs_with_grads=inputs[0],
-            print_net_images=True,
         )
 
     @given(
@@ -563,7 +561,7 @@ class RNNCellTest(hu.HypothesisTestCase):
         fwd_only=st.booleans(),
         drop_states=st.booleans(),
     )
-    @ht_settings(max_examples=15)
+    @ht_settings(max_examples=3, timeout=100)
     @utils.debug
     def test_lstm_main(self, **kwargs):
         for lstm_type in [(rnn_cell.LSTM, lstm_reference),
