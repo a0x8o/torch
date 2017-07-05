@@ -422,6 +422,12 @@ DELEGATE_SIMPLE_UNARY_FUNCTION(
     VML_HA | VML_FTZDAZ_OFF | VML_ERRMODE_IGNORE)
 DELEGATE_SIMPLE_UNARY_FUNCTION(float, Log, vsLn)
 DELEGATE_SIMPLE_UNARY_FUNCTION(double, Log, vdLn)
+DELEGATE_SIMPLE_UNARY_FUNCTION(float, Cos, vsCos)
+DELEGATE_SIMPLE_UNARY_FUNCTION(double, Cos, vdCos)
+DELEGATE_SIMPLE_UNARY_FUNCTION(float, Sin, vsSin)
+DELEGATE_SIMPLE_UNARY_FUNCTION(double, Sin, vdSin)
+DELEGATE_SIMPLE_UNARY_FUNCTION(float, Abs, vsAbs)
+DELEGATE_SIMPLE_UNARY_FUNCTION(double, Abs, vdAbs)
 DELEGATE_SIMPLE_UNARY_FUNCTION(float, Sqr, vsSqr)
 DELEGATE_SIMPLE_UNARY_FUNCTION(double, Sqr, vdSqr)
 #undef DELEGATE_SIMPLE_UNARY_FUNCTION
@@ -463,6 +469,9 @@ void Funcname<T, CPUContext>(const int N, const T* x, T* y,                    \
 }
 DELEGATE_SIMPLE_UNARY_FUNCTION(float, Exp, exp)
 DELEGATE_SIMPLE_UNARY_FUNCTION(float, Log, log)
+DELEGATE_SIMPLE_UNARY_FUNCTION(float, Cos, cos)
+DELEGATE_SIMPLE_UNARY_FUNCTION(float, Sin, sin)
+DELEGATE_SIMPLE_UNARY_FUNCTION(float, Abs, abs)
 DELEGATE_SIMPLE_UNARY_FUNCTION(float, Sqr, square)
 #undef DELEGATE_SIMPLE_UNARY_FUNCTION
 
@@ -730,7 +739,9 @@ void RandGaussian<float, CPUContext>(
 #define CAFFE2_SPECIALIZED_SUM(T)                                \
   template <>                                                    \
   void Sum<T, CPUContext>(                                       \
-      const int N, const T* x, T* y, CPUContext* /* unused */) { \
+      const int N, const T* x, T* y,                             \
+      CPUContext* /* unused */,                                  \
+      Tensor<CPUContext>* scratch_ptr /* unused */) {            \
     *y = ConstEigenVectorMap<T>(x, N).sum();                     \
   }
 

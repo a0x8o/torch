@@ -7,6 +7,8 @@ from __future__ import unicode_literals
 
 from collections import namedtuple, OrderedDict
 from past.builtins import basestring
+from future.utils import viewitems, viewkeys, viewvalues
+from itertools import chain
 from six import binary_type, string_types, text_type
 
 from caffe2.proto import caffe2_pb2
@@ -220,10 +222,11 @@ class BlobReference(object):
             op
             for op in _REGISTERED_OPERATORS
             if '_ENGINE_' not in op or '_ENGINE_CUDNN' in op]
-        return sorted(set(
-            dir(type(self)) +
-            self.__dict__.keys() +
-            additional_methods))
+        return sorted(set(chain(
+            dir(type(self)),
+            viewkeys(self.__dict__),
+            additional_methods
+        )))
 
 
 def ScopedName(name):
@@ -316,7 +319,7 @@ def CreateOperator(
     if arg is not None:
         operator.arg.extend(arg)
     # Add all other arguments
-    for key, value in kwargs.items():
+    for key, value in viewitems(kwargs):
         operator.arg.add().CopyFrom(utils.MakeArgument(key, value))
 
     if workspace.IsImmediate():
@@ -415,6 +418,8 @@ class IR(object):
         self.frontier = defaultdict(int)
         self.gradient_frontier = {}
         self.gradient_generators = defaultdict(lambda: defaultdict(list))
+        self.out_version_history = defaultdict(list)
+        self.in_version_history = defaultdict(list)
 
         for op in operators:
             self.Play(op)
@@ -428,6 +433,7 @@ class IR(object):
         for s in op.input:
             in_versions[s] = self.frontier[s]
             self.input_usages[s][self.frontier[s]].append(len(self.ssa))
+            self.in_version_history[s].append((op, self.frontier[s]))
         # For output, they are the current version plus one. If this is a
         # newly created blob, its version starts with zero.
         out_versions = {}
@@ -435,6 +441,7 @@ class IR(object):
             if s in self.frontier:
                 self.frontier[s] += 1
             out_versions[s] = self.frontier[s]
+            self.out_version_history[s].append((op, self.frontier[s]))
         # Add to SSA for bookkeeping.
         self.ssa.append(OpSSA(op, in_versions, out_versions))
 
@@ -443,6 +450,26 @@ class IR(object):
         """Checks if the gradient operators can be correctly carried out."""
         forward_op, in_versions, out_versions = self.ssa[fwd_op_idx]
         original_index = GetIndexFromGradientList(g_output, grad_op_input)
+
+        # Functions to generate debug help for version-mismatches
+        def versionMismatchInfoOut(name):
+            s = "DEBUG HELP:\n"
+            s += "Maybe you use same output blob twice for different ops?\n"
+            s += "== Version history of blob [{}]\n".format(name)
+            for (op, vers) in self.out_version_history[name]:
+                s += "Version (out) {} <-- {}".format(vers, op)
+                s += "\n"
+            return s
+
+        def versionMismatchInfoIn(name):
+            s = "DEBUG HELP:\n"
+            s += "Maybe the blob was overwritten by another op?\n"
+            s += "== Version history of blob [{}]\n".format(name)
+            for (op, vers) in self.in_version_history[name]:
+                s += "version (in) {} <-- {}".format(vers, op)
+                s += "\n"
+            return s
+
         # If it is a dense or sparse gradient name, it should match the
         # version of the corresponding output.
         if original_index is not None:
@@ -452,20 +479,21 @@ class IR(object):
                 raise RuntimeError(
                     'Gradient name "%s" is expected to correspond '
                     'to version %d of "%s", but currently we have '
-                    'version %d.' % (
+                    'version %d.\n\n' % (
                         grad_op_input, out_versions[original_name],
                         original_name,
-                        self.gradient_frontier[original_name]))
+                        self.gradient_frontier[original_name]) +
+                    versionMismatchInfoOut(original_name))
         # If it is an output name, the current version should match the
         # version when the operator was run.
         elif grad_op_input in out_versions:
             if self.frontier[grad_op_input] != out_versions[grad_op_input]:
                 raise RuntimeError(
                     'Gradient operator needs output "%s" at version'
-                    ' %d, but currently we have version %d.' % (
+                    ' %d, but currently we have version %d.\n\n' % (
                         grad_op_input, out_versions[grad_op_input],
                         self.frontier[grad_op_input]
-                    )
+                    ) + versionMismatchInfoOut(grad_op_input)
                 )
         # If it is an input name, the current version should match the
         # version when the operator was run.
@@ -473,10 +501,10 @@ class IR(object):
             if (self.frontier[grad_op_input] != in_versions[grad_op_input]):
                 raise RuntimeError(
                     'Gradient operator needs input "%s" at version '
-                    '%d, but currently we have version %d.' % (
+                    '%d, but currently we have version %d.\n\n' % (
                         grad_op_input, in_versions[grad_op_input],
                         self.frontier[grad_op_input]
-                    )
+                    ) + versionMismatchInfoIn(grad_op_input)
                 )
         # If it is none of the above, it should be a blob that is
         # generated locally by one of the previous gradient operators.
@@ -490,8 +518,8 @@ class IR(object):
 
     def AppendSparseGenerators(self, sparse_generators):
         # merge indices and values generators for sparse gradients
-        for name, input_generators in sparse_generators.items():
-            for version, generators in input_generators.items():
+        for name, input_generators in viewitems(sparse_generators):
+            for version, generators in viewitems(input_generators):
                 if len(generators) == 1:
                     # either indices or values are generated (but not both)
                     generator = generators[0]
@@ -825,7 +853,7 @@ class IR(object):
     def _GetInitGradients(self, ys):
         input_to_grad = {}
         gradient_ops = []
-        for y, g in ys.items():
+        for y, g in viewitems(ys):
             autograd_op = None
             if g is None:
                 autograd_op = CreateOperator(
@@ -892,7 +920,7 @@ class IR(object):
 
         # Set the gradient frontier with the initialized external
         # gradients.
-        for y, _ in ys.items():
+        for y in viewkeys(ys):
             self.gradient_frontier[y] = self.frontier[y]
             self.input_usages[str(y)][self.frontier[str(y)]].append(
                 len(self.ssa))
@@ -924,7 +952,7 @@ class IR(object):
         # operators ready. For the output map, we will convert everything to
         # BlobReferences for easier handling in python.
         all_input_to_grad_out = {}
-        for key, val in all_input_to_grad.items():
+        for key, val in viewitems(all_input_to_grad):
             if val is not None:
                 if (isinstance(val, string_types) or
                         isinstance(val, binary_type)):
@@ -1170,7 +1198,7 @@ def clone_and_bind_net(net, name, prefix, blob_remap=None, inputs=None,
     ssa, blob_versions = get_ssa(proto)
     undef_blobs = get_undefined_blobs(ssa)
 
-    for blob in blob_versions.keys():
+    for blob in viewkeys(blob_versions):
         if blob in blob_remap:
             continue
         elif blob in undef_blobs:
@@ -1518,7 +1546,7 @@ class Net(object):
             OrderedDict(zip(inputs, inputs)))
         for output in outputs:
             assert self.BlobIsDefined(output)
-        input_names = {str(k): str(v) for k, v in inputs.items()}
+        input_names = {str(k): str(v) for k, v in viewitems(inputs)}
         output_names = [str(o) for o in outputs]
         proto = self._net
         ssa, blob_versions = get_ssa(proto)
@@ -1529,7 +1557,7 @@ class Net(object):
             'generate the given input.')
 
         sub_ssa = [op for i, op in enumerate(ssa) if i in used_op_ids]
-        undef_blobs = get_undefined_blobs(sub_ssa) - set(input_names.keys())
+        undef_blobs = get_undefined_blobs(sub_ssa) - set(viewkeys(input_names))
         prefix = (name + '/') if name else ''
 
         def remap(blob_name):
@@ -1540,10 +1568,10 @@ class Net(object):
             else:
                 return prefix + blob_name
 
-        blob_mapping = {b: remap(b) for b in blob_versions.keys()}
+        blob_mapping = {b: remap(b) for b in viewkeys(blob_versions)}
         new_net = self.Clone(name, blob_mapping, used_op_ids, remap_funcs)
         new_in = [
-            blob_mapping[i] for i in input_names.keys()] + list(undef_blobs)
+            blob_mapping[i] for i in viewkeys(input_names)] + list(undef_blobs)
         new_out = [blob_mapping[o] for o in output_names]
         del new_net.Proto().external_input[:]
         new_net.Proto().external_input.extend(new_in)
@@ -1723,7 +1751,9 @@ class Net(object):
 
     def set_input_record(self, input_record):
         from caffe2.python import schema
-        assert self._input_record is None, (
+        assert self._input_record is None or (input_record.has_blobs() and
+            set(input_record.field_blobs()) ==
+            set(self._input_record.field_blobs())), (
             'Input schema cannot be reset')
         if not input_record.has_blobs():
             with NameScope(self.Name()):
@@ -1745,8 +1775,10 @@ class Net(object):
             self.set_input_record(record)
 
     def set_output_record(self, record):
-        assert self._output_record is None, (
-            'Output record cannot be reset')
+        assert self._output_record is None or (record.has_blobs() and
+            set(record.field_blobs()) ==
+            set(self._output_record.field_blobs())), (
+            'Output schema cannot be reset')
         for blob in record.field_blobs():
             assert self.BlobIsDefined(blob), "{} is not defined".format(blob)
         for blob in record.field_blobs():
@@ -1862,10 +1894,11 @@ class Net(object):
             op
             for op in _REGISTERED_OPERATORS
             if '_ENGINE_' not in op]
-        return sorted(set(
-            dir(type(self)) +
-            self.__dict__.keys() +
-            additional_methods))
+        return sorted(set(chain(
+            dir(type(self)),
+            viewkeys(self.__dict__),
+            additional_methods
+        )))
 
     def Python(
         self,
@@ -1944,7 +1977,8 @@ class Net(object):
             grad_output_indices=grad_output_indices,
             grad_input_indices=grad_input_indices,
             *args,
-            **dict(kwargs.items() + core_kwargs.items()))
+            **dict(chain(viewitems(kwargs), viewitems(core_kwargs)))
+        )
 
     def is_external_input(self, blob):
         name = str(blob)
@@ -2223,7 +2257,7 @@ class ExecutionStep(object):
             len(self._step.substep) > 0)
 
     def Nets(self):
-        return self._net_dict.values()
+        return list(viewvalues(self._net_dict))
 
     def Substeps(self):
         return self._substeps
@@ -2301,10 +2335,11 @@ class ExecutionStep(object):
         Return the list of all attributes under the given `name`, present in
         all of the nets used in this execution step and its children.
         """
-        objs = []
-        for net in self._net_dict.values():
-            objs += net.get_attributes(name)
-        return objs
+        return [
+            attr
+            for net in viewvalues(self._net_dict)
+            for attr in net.get_attributes(name)
+        ]
 
 
 def add_nets_in_order(step, net_list):
@@ -2347,7 +2382,7 @@ class Plan(object):
                 self._plan.network.add().CopyFrom(net.Proto())
 
     def Nets(self):
-        return self._net_dict.values()
+        return list(viewvalues(self._net_dict))
 
     def AddStep(self, step):
         assert isinstance(step, ExecutionStep)
@@ -2365,10 +2400,11 @@ class Plan(object):
         Return the list of all attributes under the given `name`, present in
         all of the nets used in this plan.
         """
-        objs = []
-        for net in self._net_dict.values():
-            objs += net.get_attributes(name)
-        return objs
+        return [
+            attr
+            for net in viewvalues(self._net_dict)
+            for attr in net.get_attributes(name)
+        ]
 
 
 def to_execution_step(step_or_nets, default_name=None):

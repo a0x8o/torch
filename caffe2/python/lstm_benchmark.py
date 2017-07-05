@@ -19,7 +19,7 @@ log = logging.getLogger("lstm_bench")
 log.setLevel(logging.DEBUG)
 
 
-def generate_data(T, shape, num_labels):
+def generate_data(T, shape, num_labels, fixed_shape):
     '''
     Fill a queue with input data
     '''
@@ -40,13 +40,14 @@ def generate_data(T, shape, num_labels):
     generate_input_net.EnqueueBlobs([label_queue, "label_scr"], ["label_scr"])
     np.random.seed(2603)
 
+    entry_counts = []
     for t in range(T):
         if (t % (max(10, T // 10)) == 0):
             print("Generating data {}/{}".format(t, T))
         # Randomize the seqlength
         random_shape = (
             [np.random.randint(1, shape[0])] + shape[1:]
-            if t > 0 and not args.fixed_shape else shape
+            if t > 0 and not fixed_shape else shape
         )
         X = np.random.rand(*random_shape).astype(np.float32)
         batch_size = random_shape[1]
@@ -55,10 +56,11 @@ def generate_data(T, shape, num_labels):
         workspace.FeedBlob("scratch", X)
         workspace.FeedBlob("label_scr", labels)
         workspace.RunNetOnce(generate_input_net.Proto())
+        entry_counts.append(random_shape[0] * random_shape[1])
 
     log.info("Finished data generation")
 
-    return queue, label_queue
+    return queue, label_queue, entry_counts
 
 
 def create_model(args, queue, label_queue, input_shape):
@@ -151,9 +153,10 @@ def Caffe2LSTM(args):
     T = args.data_size // args.batch_size
 
     input_blob_shape = [args.seq_length, args.batch_size, args.input_dim]
-    queue, label_queue = generate_data(T // args.seq_length,
+    queue, label_queue, entry_counts = generate_data(T // args.seq_length,
                                        input_blob_shape,
-                                       args.hidden_dim)
+                                       args.hidden_dim,
+                                       args.fixed_shape)
 
     workspace.FeedBlob(
         "seq_lengths",
@@ -165,16 +168,13 @@ def Caffe2LSTM(args):
     workspace.RunNetOnce(model.param_init_net)
     workspace.CreateNet(model.net)
 
-    last_time = time.time()
-    start_time = last_time
+    start_time = time.time()
     num_iters = T // args.seq_length
-    entries_per_iter = args.seq_length * args.batch_size
     total_iters = 0
 
     # Run the Benchmark
     log.info("------ Warming up ------")
     workspace.RunNet(model.net.Proto().name)
-    num_iters = num_iters - 1
 
     if (args.gpu):
         log.info("Memory stats:")
@@ -183,21 +183,25 @@ def Caffe2LSTM(args):
 
     log.info("------ Starting benchmark ------")
     start_time = time.time()
-    for iteration in range(0, num_iters, args.iters_to_report):
+    last_time = time.time()
+    for iteration in range(1, num_iters, args.iters_to_report):
         iters_once = min(args.iters_to_report, num_iters - iteration)
         total_iters += iters_once
         workspace.RunNet(model.net.Proto().name, iters_once)
 
         new_time = time.time()
-        log.info("Iter: {} / {}. Entries Per Second: {}k.". format(
-            iteration,
-            num_iters,
-            entries_per_iter * iters_once / (new_time - last_time) // 100 / 10,
-        ))
+        log.info(
+            "Iter: {} / {}. Entries Per Second: {}k.".format(
+                iteration,
+                num_iters,
+                np.sum(entry_counts[iteration:iteration + iters_once]) /
+                (new_time - last_time) // 100 / 10,
+            )
+        )
         last_time = new_time
 
     log.info("Done. Total EPS excluding 1st iteration: {}k".format(
-        total_iters * entries_per_iter / (time.time() - start_time) // 100 / 10,
+         np.sum(entry_counts[1:]) / (time.time() - start_time) // 100 / 10,
     ))
 
     if (args.gpu):
@@ -297,13 +301,13 @@ def GetArgumentParser():
 
 
 if __name__ == '__main__':
-    args = GetArgumentParser().parse_args()
+    args, extra_args = GetArgumentParser().parse_known_args()
 
     workspace.GlobalInit([
         'caffe2',
         '--caffe2_log_level=0',
         '--caffe2_print_blob_sizes_at_exit=0',
-        '--caffe2_gpu_memory_tracking=1'])
+        '--caffe2_gpu_memory_tracking=1'] + extra_args)
 
     device = core.DeviceOption(
         caffe2_pb2.CUDA if args.gpu else caffe2_pb2.CPU, 0)
