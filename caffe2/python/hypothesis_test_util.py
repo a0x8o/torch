@@ -195,7 +195,8 @@ def lengths_tensor(min_segments=None, max_segments=None, *args, **kwargs):
 
 def sparse_segmented_tensor(min_dim=1, max_dim=4, dtype=np.float32,
                             is_sorted=True, elements=None, allow_empty=False,
-                            segment_generator=segment_ids, **kwargs):
+                            segment_generator=segment_ids, itype=np.int64,
+                            **kwargs):
     gen_empty = st.booleans() if allow_empty else st.just(False)
     data_dims_ = st.lists(dims(**kwargs), min_size=min_dim, max_size=max_dim)
     all_dims_ = st.tuples(gen_empty, data_dims_).flatmap(
@@ -206,7 +207,7 @@ def sparse_segmented_tensor(min_dim=1, max_dim=4, dtype=np.float32,
         ))
     return all_dims_.flatmap(lambda dims: st.tuples(
         arrays(dims[0], dtype, elements),
-        arrays(dims[1], dtype=np.int64, elements=st.integers(
+        arrays(dims[1], dtype=itype, elements=st.integers(
             min_value=0, max_value=dims[0][0] - 1)),
         segment_generator(dims[1], is_sorted=is_sorted),
     ))
@@ -550,11 +551,16 @@ class HypothesisTestCase(test_util.TestCase):
                     self._assertInferTensorChecks(
                         output_blob_name, shapes, types, output)
                 outs.append(output)
-            if grad_reference and output_to_grad:
+            if grad_reference is not None:
+                assert output_to_grad is not None, \
+                    "If grad_reference is set," \
+                    "output_to_grad has to be set as well"
+
                 with core.DeviceScope(device_option):
                     self._assertGradReferenceChecks(
                         op, inputs, reference_outputs,
-                        output_to_grad, grad_reference)
+                        output_to_grad, grad_reference,
+                        threshold=threshold)
             return outs
 
     def assertValidationChecks(
@@ -592,3 +598,31 @@ class HypothesisTestCase(test_util.TestCase):
                     list(op.input) + list(op.output), inputs + outputs)))
             else:
                 validator(inputs=inputs, outputs=outputs)
+
+    def assertRunOpRaises(
+        self,
+        device_option,
+        op,
+        inputs,
+        input_device_options=None,
+        exception=(Exception,),
+        regexp=None,
+    ):
+        if input_device_options is None:
+            input_device_options = {}
+
+        op = copy.deepcopy(op)
+        op.device_option.CopyFrom(device_option)
+
+        with temp_workspace():
+            for (n, b) in zip(op.input, inputs):
+                workspace.FeedBlob(
+                    n,
+                    b,
+                    device_option=input_device_options.get(n, device_option)
+                )
+            if regexp is None:
+                self.assertRaises(exception, workspace.RunOperatorOnce, op)
+            else:
+                self.assertRaisesRegexp(
+                    exception, regexp, workspace.RunOperatorOnce, op)

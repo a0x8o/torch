@@ -101,13 +101,13 @@ CudaMemoryPoolType GetCudaMemoryPoolType() {
 }
 
 vector<TIndex> GetCUDATensorInfo(
-    void* c,
+    const void* c,
     bool* shares_data,
     size_t* capacity,
     DeviceOption* device) {
   vector<TIndex> dims =
       GetTensorInfo<CUDAContext>(c, shares_data, capacity, device);
-  Tensor<CUDAContext>* tc = static_cast<Tensor<CUDAContext>*>(c);
+  const Tensor<CUDAContext>* tc = static_cast<const Tensor<CUDAContext>*>(c);
   device->set_device_type(CUDA);
   device->set_cuda_gpu_id(GetGPUIDForPointer(tc->raw_data()));
   return dims;
@@ -394,7 +394,7 @@ void TrackMemoryAlloc(size_t nbytes) {
 }
 }
 
-void* CUDAContext::New(size_t nbytes) {
+std::pair<void*, MemoryDeleter> CUDAContext::New(size_t nbytes) {
   // Lock the mutex
   std::lock_guard<std::mutex> lock(CUDAContext::mutex());
   // A one-time caffe2 cuda initializer.
@@ -411,7 +411,7 @@ void* CUDAContext::New(size_t nbytes) {
       g_size_map[ptr] = nbytes;
       g_cuda_device_affiliation[ptr] = GetCurrentGPUID();
     }
-    return ptr;
+    return {ptr, Delete};
   case CudaMemoryPoolType::CNMEM: {
 #ifdef CAFFE2_USE_CNMEM
     auto gpuId = GetCurrentGPUID();
@@ -428,7 +428,7 @@ void* CUDAContext::New(size_t nbytes) {
     if (FLAGS_caffe2_gpu_memory_tracking) {
       g_size_map[ptr] = nbytes;
     }
-    return ptr;
+    return {ptr, Delete};
 #else
     CAFFE_THROW("This caffe2 is not built with cnmem support, so you should "
                 "not use the cnmem memory pool type.");
@@ -442,9 +442,9 @@ void* CUDAContext::New(size_t nbytes) {
     if (FLAGS_caffe2_gpu_memory_tracking) {
       g_size_map[ptr] = nbytes;
     }
-    return ptr;
+    return {ptr, Delete};
   }
-  return nullptr;
+  return {nullptr, Delete};
 }
 
 void CUDAContext::Delete(void* ptr) {

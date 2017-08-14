@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import numpy as np
 import copy
+import time
 from functools import partial, reduce
 from future.utils import viewitems, viewkeys
 from hypothesis import assume, given, settings
@@ -377,22 +378,35 @@ class TestOperators(hu.HypothesisTestCase):
 
     @given(ndim=st.integers(1, 4),
            axis=st.integers(0, 3),
+           add_axis=st.integers(0, 1),
            num_inputs=st.integers(2, 4), **hu.gcs)
-    def test_depth_concat(self, ndim, axis, num_inputs, gc, dc):
+    def test_depth_concat(self, ndim, axis, add_axis, num_inputs, gc, dc):
         assume(axis < ndim)
         input_names = ['X0', 'X1', 'X2', 'X3'][:num_inputs]
         shape = [2, 3, 5, 7][:ndim]
         individual_dims = [1, 2, 3, 4, 5][:num_inputs]
         inputs = []
         for i in range(num_inputs):
-            # Sets a unique dim and create the input.
-            shape[axis] = individual_dims[i]
+            if add_axis == 0:
+                # Sets a unique dim and create the input.
+                shape[axis] = individual_dims[i]
             inputs.append(np.random.randn(*shape).astype(np.float32))
         op = core.CreateOperator("Concat", input_names, ["Y", "Y_dims"],
-                                 axis=axis)
+                                 axis=axis, add_axis=add_axis)
         self.assertDeviceChecks(dc, op, inputs, [0])
         for i in range(num_inputs):
             self.assertGradientChecks(gc, op, inputs, i, [0])
+
+        # Reference
+        def depth_concat(*inputs):
+            inputs = list(inputs)
+            if add_axis:
+                for i in range(len(inputs)):
+                    inputs[i] = np.expand_dims(inputs[i], axis)
+            input_dims = np.array([np.shape(x)[axis] for x in inputs])
+            return [np.concatenate(inputs, axis=axis), input_dims]
+
+        self.assertReferenceChecks(gc, op, inputs, depth_concat)
 
     @given(num_inputs=st.integers(2, 4),
            order=st.sampled_from([("NCHW", 1), ("NHWC", 3)]),
@@ -411,6 +425,15 @@ class TestOperators(hu.HypothesisTestCase):
         self.assertDeviceChecks(dc, op, inputs, [0])
         for i in range(num_inputs):
             self.assertGradientChecks(gc, op, inputs, i, [0])
+
+        # Reference
+        def depth_concat_with_order(*inputs):
+            inputs = list(inputs)
+            axis = order[1]
+            input_dims = np.array([np.shape(x)[axis] for x in inputs])
+            return [np.concatenate(inputs, axis=axis), input_dims]
+
+        self.assertReferenceChecks(gc, op, inputs, depth_concat_with_order)
 
     @given(X=hu.arrays(dims=[5, 2],
                        elements=st.floats(min_value=0.0, max_value=10.0)),
@@ -436,105 +459,6 @@ class TestOperators(hu.HypothesisTestCase):
             new_output[i % 7] = inputs[i % inputs.shape[0]]
         import numpy.testing as npt
         npt.assert_almost_equal(output, new_output, decimal=5)
-
-    @given(batch_size=st.integers(1, 3),
-           stride=st.integers(1, 3),
-           pad=st.integers(0, 3),
-           kernel=st.integers(1, 5),
-           dilation=st.integers(1, 3),
-           size=st.integers(7, 10),
-           channels=st.integers(1, 8),
-           **hu.gcs)
-    def test_im2col_layout(self, batch_size, stride, pad, kernel, dilation,
-                           size, channels, gc, dc):
-
-        dkernel = (dilation * (kernel - 1) + 1)
-        assume(size >= dkernel)
-
-        NCHW_TO_NHWC = (0, 2, 3, 1)
-        NHWC_TO_NCHW = (0, 3, 1, 2)
-        COL_NHWC_TO_NCHW = (4, 2, 3, 0, 1)
-
-        N = batch_size
-        C = channels
-        H = size
-        W = size
-
-        out_h = int((H + (2 * pad) - dkernel) / stride + 1)
-        out_w = int((W + (2 * pad) - dkernel) / stride + 1)
-
-        im_nchw = np.random.rand(N, C, H, W).astype(np.float32) - 0.5
-        im_nhwc = im_nchw.transpose(NCHW_TO_NHWC)
-
-        op_im2col_nchw = core.CreateOperator(
-            "Im2Col",
-            ["im_nchw"], ["col_nchw"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NCHW",
-            device_option=gc)
-
-        op_im2col_nhwc = core.CreateOperator(
-            "Im2Col",
-            ["im_nhwc"], ["col_nhwc"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NHWC",
-            device_option=gc)
-
-        self.ws.create_blob("im_nchw").feed(im_nchw, device_option=gc)
-        self.ws.create_blob("im_nhwc").feed(im_nhwc, device_option=gc)
-        self.ws.run(op_im2col_nchw)
-        self.ws.run(op_im2col_nhwc)
-
-        # there is probably a clever way to spell this in np
-        col_nchw = self.ws.blobs["col_nchw"].fetch()
-        col_nhwc = self.ws.blobs["col_nhwc"].fetch()
-        col_nchw_ = col_nchw.reshape(N, C, kernel, kernel, out_h, out_w)
-        col_nhwc_ = col_nhwc.reshape(N, out_h, out_w, kernel, kernel, C)
-        for i in range(0, N):
-            np.testing.assert_allclose(
-                col_nchw_[i],
-                col_nhwc_[i].transpose(COL_NHWC_TO_NCHW),
-                atol=1e-4,
-                rtol=1e-4)
-
-        op_col2im_nchw = core.CreateOperator(
-            "Col2Im",
-            ["col_nchw", "im_nchw"],
-            ["out_nchw"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NCHW",
-            device_option=gc)
-
-        op_col2im_nhwc = core.CreateOperator(
-            "Col2Im",
-            ["col_nhwc", "im_nhwc"],
-            ["out_nhwc"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NHWC",
-            device_option=gc)
-
-        self.ws.run(op_col2im_nchw)
-        self.ws.run(op_col2im_nhwc)
-
-        out_nchw = self.ws.blobs["out_nchw"].fetch()
-        out_nhwc = self.ws.blobs["out_nhwc"].fetch()
-        np.testing.assert_allclose(
-            out_nchw,
-            out_nhwc.transpose(NHWC_TO_NCHW),
-            atol=1e-4,
-            rtol=1e-4)
 
     @given(dtype=st.sampled_from([np.float32, np.float64, np.int32, np.bool]))
     def test_print(self, dtype):
@@ -1167,6 +1091,24 @@ class TestOperators(hu.HypothesisTestCase):
             inputs=[input_tensor],
             reference=log_ref)
         self.assertGradientChecks(gc, op, [input_tensor], 0, [0])
+
+    def test_blobs_dequeue_timeout(self):
+        op = core.CreateOperator(
+            "CreateBlobsQueue",
+            [],
+            ["queue"],
+            capacity=5,
+            num_blobs=1)
+        self.ws.run(op)
+        t = time.time()
+        op = core.CreateOperator(
+            "DequeueBlobs",
+            ["queue"],
+            ["out"],
+            timeout_secs=0.2)
+        self.assertRaises(RuntimeError, lambda: self.ws.run(op))
+        t = time.time() - t
+        self.assertGreater(t, 0.19)
 
     @given(num_threads=st.integers(1, 10),  # noqa
            num_elements=st.integers(1, 100),
@@ -2013,49 +1955,6 @@ class TestOperators(hu.HypothesisTestCase):
         self.ws.create_blob("b").deserialize(serialized)
         self.assertEqual(s, self.ws.blobs[("a")].fetch())
         self.assertEqual(s, self.ws.blobs[("b")].fetch())
-
-    @given(n=st.integers(1, 3),
-           dim=st.integers(4, 16),
-           **hu.gcs)
-    def test_distances(self, n, dim, gc, dc):
-        X = np.random.uniform(-1, 1, (n, dim)).astype(np.float32)
-        Y = np.random.uniform(-1, 1, (n, dim)).astype(np.float32)
-        self.ws.create_blob("X").feed(X)
-        self.ws.create_blob("Y").feed(Y)
-
-        def check_grad(op):
-            self.assertGradientChecks(gc, op, [X, Y], 0, [0],
-                                      stepsize=1e-2, threshold=1e-2)
-            self.assertGradientChecks(gc, op, [X, Y], 1, [0],
-                                      stepsize=1e-2, threshold=1e-2)
-
-        l2_op = core.CreateOperator("SquaredL2Distance",
-                                    ["X", "Y"], ["l2_dist"])
-        self.ws.run(l2_op)
-        np.testing.assert_allclose(self.ws.blobs[("l2_dist")].fetch(),
-                                   np.square(X - Y).sum(axis=1) * 0.5,
-                                   rtol=1e-4, atol=1e-4)
-        check_grad(l2_op)
-        if gc.device_type == 1:
-            # Only SquaredL2Distance has CUDA implementation
-            return
-
-        dot_op = core.CreateOperator("DotProduct", ["X", "Y"], ["dot"])
-        self.ws.run(dot_op)
-        np.testing.assert_allclose(self.ws.blobs[("dot")].fetch(),
-                                   np.multiply(X, Y).sum(axis=1),
-                                   rtol=1e-4, atol=1e-4)
-        check_grad(dot_op)
-
-        kEps = 1e-12
-        cos_op = core.CreateOperator("CosineSimilarity", ["X", "Y"], ["cos"])
-        self.ws.run(cos_op)
-        cos = np.divide(np.multiply(X, Y).sum(axis=1),
-                        np.multiply(np.linalg.norm(X, axis=1) + kEps,
-                                    np.linalg.norm(Y, axis=1) + kEps))
-        np.testing.assert_allclose(self.ws.blobs[("cos")].fetch(), cos,
-                                   rtol=1e-4, atol=1e-4)
-        check_grad(cos_op)
 
     @given(pad=st.integers(0, 3),
            size=st.integers(1, 10),

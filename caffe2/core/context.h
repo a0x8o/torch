@@ -18,12 +18,13 @@ namespace caffe2 {
 // Use 32-byte alignment should be enough for computation up to AVX512.
 constexpr size_t gCaffe2Alignment = 32;
 
+using MemoryDeleter = std::function<void(void* ptr)>;
+
 // A virtual allocator class to do memory allocation and deallocation.
 struct CPUAllocator {
   CPUAllocator() {}
   virtual ~CPUAllocator() noexcept {}
-  virtual void* New(size_t nbytes) = 0;
-  virtual void Delete(void* data) = 0;
+  virtual std::pair<void*, MemoryDeleter> New(size_t nbytes) = 0;
 };
 
 // A virtual struct that is used to report Caffe2's memory allocation and
@@ -43,7 +44,7 @@ class MemoryAllocationReporter {
 struct DefaultCPUAllocator final : CPUAllocator {
   DefaultCPUAllocator() {}
   ~DefaultCPUAllocator() override {}
-  void* New(size_t nbytes) override {
+  std::pair<void*, MemoryDeleter> New(size_t nbytes) override {
     void* data = nullptr;
 #ifdef __ANDROID__
     data = memalign(gCaffe2Alignment, nbytes);
@@ -52,14 +53,18 @@ struct DefaultCPUAllocator final : CPUAllocator {
 #else
     CAFFE_ENFORCE_EQ(posix_memalign(&data, gCaffe2Alignment, nbytes), 0);
 #endif
-    CHECK(data) << "Failed to allocate " << nbytes << " bytes.";
+    CAFFE_ENFORCE(data);
     memset(data, 0, nbytes);
-    return data;
+    return {data, Delete};
   }
 #ifdef _MSC_VER
-  void Delete(void* data) override { _aligned_free(data); }
+  static void Delete(void* data) {
+    _aligned_free(data);
+  }
 #else
-  void Delete(void* data) override { free(data); }
+  static void Delete(void* data) {
+    free(data);
+  }
 #endif
 };
 
@@ -87,13 +92,13 @@ void SetCPUAllocator(CPUAllocator* alloc);
  * implementing if you want to write your own context class:
  * - void SwitchToDevice(): any necessary code to switch to the device before
  *     running anything.
- * - bool FinishDeviceComputation(): any wrapping-up work after all the
+ * - void FinishDeviceComputation(): any wrapping-up work after all the
  *     computation of the operator is done. If there are errors during the
- *     execution, return false. For example, in a CUDAContext, this function
+ *     execution, throw exception. For example, in a CUDAContext, this function
  *     carries out a stream synchronization and spots potential errors for
  *     the cuda kernel calls.
- * - static void* New(size_t nbytes): allocates memory.
- * - static void Delete(void* data): deletes memory.
+ * - static std::pair<void*, MemoryDeleter> New(size_t nbytes): allocates
+       memory and returns a deleter.
  * - template <class SrcContext, class DstContext> void CopyBytes(...): does
  *     cross context memory copy.
  * - template <typename T, class SrcContext, class DstContext> void Copy(...):
@@ -116,12 +121,12 @@ class CPUContext final {
 
   ~CPUContext() noexcept {}
 
-  inline void SwitchToDevice(int stream_id) {}
+  inline void SwitchToDevice(int /*stream_id*/) {}
   inline void SwitchToDevice() {
     SwitchToDevice(0);
   }
 
-  inline bool FinishDeviceComputation() { return true; }
+  inline void FinishDeviceComputation() {}
 
   inline rand_gen_type& RandGenerator() {
     if (!random_generator_.get()) {
@@ -130,19 +135,17 @@ class CPUContext final {
     return *random_generator_.get();
   }
 
-  static void* New(size_t nbytes) {
-    void* data = GetCPUAllocator()->New(nbytes);
+  static std::pair<void*, MemoryDeleter> New(size_t nbytes) {
+    auto data_and_deleter = GetCPUAllocator()->New(nbytes);
     if (FLAGS_caffe2_report_cpu_memory_usage) {
-      reporter_.New(data, nbytes);
+      reporter_.New(data_and_deleter.first, nbytes);
+      auto original_deleter = data_and_deleter.second;
+      data_and_deleter.second = [original_deleter](void* data) {
+        reporter_.Delete(data);
+        original_deleter(data);
+      };
     }
-    return data;
-  }
-
-  static void Delete(void* data) {
-    if (FLAGS_caffe2_report_cpu_memory_usage) {
-      reporter_.Delete(data);
-    }
-    GetCPUAllocator()->Delete(data);
+    return data_and_deleter;
   }
 
   // Two copy functions that deals with cross-device copies.

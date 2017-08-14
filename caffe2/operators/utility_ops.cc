@@ -51,8 +51,6 @@ void UniqueOp<CPUContext>::DoRun() {
   }
 }
 
-namespace {
-
 REGISTER_CPU_OPERATOR(WallClockTime, WallClockTimeOp<CPUContext>);
 REGISTER_CPU_OPERATOR(Print, PrintOp<CPUContext>);
 REGISTER_CPU_OPERATOR(Flatten, FlattenOp<CPUContext>);
@@ -60,7 +58,6 @@ REGISTER_CPU_OPERATOR(FlattenToVec, FlattenToVecOp<CPUContext>);
 
 REGISTER_CPU_OPERATOR(Alias, AliasOp<CPUContext>);
 REGISTER_CPU_OPERATOR(ResizeLike, ResizeLikeOp<CPUContext>);
-REGISTER_CPU_OPERATOR(Sum, SumOp<CPUContext>);
 REGISTER_CPU_OPERATOR(SumInt, SumOp<CPUContext>);
 REGISTER_CPU_OPERATOR(WeightedSum, WeightedSumOp<CPUContext>);
 REGISTER_CPU_OPERATOR(
@@ -159,17 +156,17 @@ unchanged.
 OPERATOR_SCHEMA(FlattenToVec)
     .NumInputs(1)
     .NumOutputs(1)
-    .TensorInferenceFunction(
-        [](const OperatorDef& def, const vector<TensorShape>& in) {
-          vector<TensorShape> out(1);
-          int total = 1;
-          for (auto d : in[0].dims()) {
-            total *= d;
-          }
-          out[0].set_data_type(in[0].data_type());
-          out[0].add_dims(total);
-          return out;
-        })
+    .TensorInferenceFunction([](const OperatorDef& /*def*/,
+                                const vector<TensorShape>& in) {
+      vector<TensorShape> out(1);
+      int total = 1;
+      for (auto d : in[0].dims()) {
+        total *= d;
+      }
+      out[0].set_data_type(in[0].data_type());
+      out[0].add_dims(total);
+      return out;
+    })
     .SetDoc(R"DOC(
 Flattens the input tensor into a 1D vector.
 )DOC")
@@ -202,13 +199,13 @@ similar to multi-thread computation before you use it explicitly.
 OPERATOR_SCHEMA(ResizeLike)
     .NumInputs(2)
     .NumOutputs(1)
-    .TensorInferenceFunction(
-        [](const OperatorDef& def, const vector<TensorShape>& in) {
-          vector<TensorShape> out(1);
-          out.push_back(in[1]);
-          out[0].set_data_type(in[0].data_type());
-          return out;
-        })
+    .TensorInferenceFunction([](const OperatorDef& /*def*/,
+                                const vector<TensorShape>& in) {
+      vector<TensorShape> out(1);
+      out.push_back(in[1]);
+      out[0].set_data_type(in[0].data_type());
+      return out;
+    })
     .SetDoc(R"DOC(
 Produces tensor containing data of first input and shape of second input.
 )DOC")
@@ -220,7 +217,7 @@ OPERATOR_SCHEMA(SumInt)
     .NumInputs(1, INT_MAX)
     .NumOutputs(1)
     .InputsCanCrossDevices()
-    .TensorInferenceFunction([](const OperatorDef& def,
+    .TensorInferenceFunction([](const OperatorDef& /*def*/,
                                 const vector<TensorShape>& in) {
       vector<TensorShape> out(1);
       out.push_back(in[0]);
@@ -228,21 +225,6 @@ OPERATOR_SCHEMA(SumInt)
       return out;
     })
     .AllowInplace({{0, 0}});
-
-OPERATOR_SCHEMA(Sum)
-    .NumInputs(1, INT_MAX)
-    .NumOutputs(1)
-    .AllowInplace({{0, 0}})
-    .InputsCanCrossDevices()
-    .IdenticalTypeAndShapeOfInput(0)
-    .SetDoc(R"DOC(
-Element-wise sum of each of the input tensors. The first input tensor can be
-used in-place as the output tensor, in which case the sum will be done in
-place and results will be accumulated in input0. All inputs and outputs must
-have the same shape and data type.
-)DOC")
-    .Input(0, "data_0", "First of the input tensors. Can be inplace.")
-    .Output(0, "sum", "Output tensor. Same dimension as inputs.");
 
 OPERATOR_SCHEMA(WeightedSum)
     .NumInputs([](int n) { return (n > 0 && n % 2 == 0); })
@@ -452,13 +434,13 @@ OPERATOR_SCHEMA(CopyOnDeviceLike)
 OPERATOR_SCHEMA(Shape)
     .NumInputs(1)
     .NumOutputs(1)
-    .TensorInferenceFunction(
-        [](const OperatorDef& def, const vector<TensorShape>& in) {
-          vector<TensorShape> out(1);
-          out[0].add_dims(in[0].dims().size());
-          out[0].set_data_type(TensorProto::INT32);
-          return out;
-        })
+    .TensorInferenceFunction([](const OperatorDef& /*def*/,
+                                const vector<TensorShape>& in) {
+      vector<TensorShape> out(1);
+      out[0].add_dims(in[0].dims().size());
+      out[0].set_data_type(TensorProto::INT32);
+      return out;
+    })
     .SetDoc("Produce a 1D int64 tensor with the shape of the input tensor.");
 
 OPERATOR_SCHEMA(HasElements)
@@ -698,6 +680,8 @@ Example:
     .Arg("ends", "List of ending indices")
     .Output(0, "output", "Sliced data tensor.");
 
+OPERATOR_SCHEMA(SliceGradient);
+
 OPERATOR_SCHEMA(Squeeze)
     .NumInputs(1)
     .NumOutputs(1)
@@ -709,12 +693,68 @@ If the same blob is provided in input and output, the operation is copy-free.
 This is the exact inverse operation of ExpandDims given the same `dims` arg.
 )DOC")
     .Input(0, "data", "Tensors with at least max(dims) dimensions.")
-    .Output(0, "squeezed", "Reshaped tensor with same data as input.");
+    .Output(0, "squeezed", "Reshaped tensor with same data as input.")
+    .TensorInferenceFunction([](const OperatorDef& def,
+                                const vector<TensorShape>& in) {
+      ArgumentHelper helper(def);
+      auto dims = helper.template GetRepeatedArgument<int>("dims");
+      auto originalSize = dims.size();
+      std::sort(dims.begin(), dims.end());
+      dims.erase(std::unique(dims.begin(), dims.end()), dims.end());
+      if (dims.size() < originalSize) {
+        LOG(WARNING) << "Parameter `dims` has repeated dimensions.";
+      }
+      CAFFE_ENFORCE(dims.front() >= 0, "Dimension ids must be non-negative.");
+
+      vector<TensorShape> out(1);
+      std::vector<int> newDims =
+          SqueezeOp<CPUContext>::ComputeDims(GetDimsVector(in[0]), dims);
+      out[0] = CreateTensorShape(newDims, in[0].data_type());
+      return out;
+    });
 
 OPERATOR_SCHEMA(ExpandDims)
     .NumInputs(1)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
+    .TensorInferenceFunction([](const OperatorDef& def,
+                                const vector<TensorShape>& in) {
+      ArgumentHelper helper(def);
+      auto dims = helper.template GetRepeatedArgument<int>("dims");
+      auto originalSize = dims.size();
+      CAFFE_ENFORCE(originalSize > 0, "Parameter `dims` must be provided.");
+
+      std::sort(dims.begin(), dims.end());
+      dims.erase(std::unique(dims.begin(), dims.end()), dims.end());
+      if (dims.size() < originalSize) {
+        LOG(WARNING) << "Parameter `dims` has repeated dimensions.";
+      }
+
+      CAFFE_ENFORCE(dims.front() >= 0, "Dimension ids must be non-negative.");
+      CAFFE_ENFORCE_GE(
+          in[0].dims_size() + dims.size(),
+          dims.back() + 1,
+          "Input needs at least ",
+          (1 + dims.back() - dims.size()),
+          " dimensions given `dims`.");
+
+      vector<TensorShape> out(1);
+
+      int cur_pos = 0;
+      int idx = 0;
+      for (const auto new_dim : dims) {
+        for (int i = cur_pos; i < new_dim; i++) {
+          out[0].add_dims(in[0].dims(idx++));
+        }
+        out[0].add_dims(1);
+        cur_pos = new_dim + 1;
+      }
+      for (; idx < in[0].dims_size(); idx++) {
+        out[0].add_dims(in[0].dims(idx));
+      }
+      out[0].set_data_type(in[0].data_type());
+      return out;
+    })
     .SetDoc(R"DOC(
 Insert single-dimensional entries to the shape of a tensor.
 Takes one required argument `dims`, a list of dimensions that will be inserted.
@@ -1017,8 +1057,6 @@ SHOULD_NOT_DO_GRADIENT(GatherRangesOp);
 SHOULD_NOT_DO_GRADIENT(LengthsGather);
 SHOULD_NOT_DO_GRADIENT(AccumulateHistogram);
 
-} // namespace
-
 template <typename T, class Context>
 bool MaxOp<T, Context>::Compute() {
   auto& input0 = Input(0);
@@ -1072,11 +1110,11 @@ bool NanCheckOp<CPUContext>::RunOnDevice() {
   bool all_finite = input_data.allFinite();
 
   if (!all_finite) {
-    std::cerr << "Tensor contained NaN or inf: [" << this->def().input(0) << "]"
-              << std::endl;
+    std::cerr << "Tensor contained NaN or inf: [" << this->debug_def().input(0)
+              << "]" << std::endl;
 
     for (int j = 0; j < InputSize(); j++) {
-      std::cerr << "Tensor name: " << this->def().input(j) << std::endl;
+      std::cerr << "Tensor name: " << this->debug_def().input(j) << std::endl;
       std::cerr << "Input tensor:" << std::endl;
       tensorPrinter_.Print<float>(Input(j));
       std::cerr << "NaN idxs:" << std::endl;

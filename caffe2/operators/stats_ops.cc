@@ -5,7 +5,6 @@
 #include "caffe2/core/tensor.h"
 
 namespace caffe2 {
-namespace {
 
 class StatRegistryCreateOp : public Operator<CPUContext> {
  public:
@@ -120,10 +119,11 @@ class TimerInstance {
 
 struct TimerBeginOp : public Operator<CPUContext> {
   TimerBeginOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator(operator_def, ws), timer_([this]() {
-          auto givenName = GetSingleArgument<std::string>("counter_name", "");
-          return givenName.empty() ? def().output().Get(0) : givenName;
-        }()) {}
+      : Operator(operator_def, ws),
+        given_name_(GetSingleArgument<std::string>(
+            "counter_name",
+            operator_def.output().Get(0))),
+        timer_([this]() { return given_name_; }()) {}
 
   bool RunOnDevice() override {
     *OperatorBase::Output<TimerInstance*>(0) = &timer_;
@@ -132,6 +132,7 @@ struct TimerBeginOp : public Operator<CPUContext> {
   }
 
  private:
+  const std::string given_name_;
   TimerInstance timer_;
 };
 
@@ -206,7 +207,6 @@ OPERATOR_SCHEMA(StatRegistryExport)
     .Arg(
         "reset",
         "(default true) Whether to atomically reset the counters afterwards.");
-}
 
 OPERATOR_SCHEMA(TimerBegin)
     .NumInputs(0)

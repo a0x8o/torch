@@ -67,7 +67,13 @@ void Cos(const int N, const T* x, T* y, Context* context);
 template <typename T, class Context>
 void Sin(const int N, const T* x, T* y, Context* context);
 template <typename T, class Context>
+void SinCos(const int N, const T* x, T* ys, T* yc, Context* context);
+template <typename T, class Context>
 void Abs(const int N, const T* x, T* y, Context* context);
+template <typename T, class Context>
+void Sqrt(const int N, const T* x, T* y, Context* context);
+template <typename T, class Context>
+void InvSqrt(const int N, const T* x, T* y, Context* context);
 template <typename T, class Context>
 void Sqr(const int N, const T* x, T* y, Context* context);
 
@@ -147,6 +153,15 @@ void RowwiseMax(const int N, const int D, const T* x, T* y,
 template <typename T, class Context>
 void ColwiseMax(const int N, const int D, const T* x, T* y,
                 Context* context);
+
+// Elemwise maximum of vector x and scalar alpha. y[i] = max(x[i], alpha)
+template <typename T, class Context>
+void Maximum(
+    const int N,
+    const float alpha,
+    const T* x,
+    T* y,
+    Context* context);
 
 // Decaf gemm provides a simpler interface to the gemm functions, with the
 // limitation that the data has to be contiguous in memory.
@@ -237,7 +252,12 @@ void Sum(const int N, const T* x, T* y, Context* context,
 
 // Sum of squares of vector x, and writes the result to a single value y.
 template <typename T, class Context>
-void SumSqr(const int N, const T* x, T* y, Context* context);
+void SumSqr(
+    const int N,
+    const T* x,
+    T* y,
+    Context* context,
+    Tensor<Context>* scratch_ptr = nullptr);
 
 // Select does index selection of the rows a N*D matrix x, and gives the N
 // dimensional vector y that contains the selected data.
@@ -386,10 +406,17 @@ constexpr T roundUp(T a, T b) {
 }
 
 // Returns true if the given integer type is a power-of-2 (positive only)
+// Note(jiayq): windows reported an error per
+//     https://github.com/caffe2/caffe2/issues/997
+// and as a result will make it a macro.
+#ifdef _MSC_VER
+#define integerIsPowerOf2(v) ((v) && !((v) & ((v) - 1)))
+#else // _MSC_VER
 template <typename T>
 constexpr bool integerIsPowerOf2(T v) {
   return (v && !(v & (v - 1)));
 }
+#endif // _MSC_VER
 
 // Returns log2(n) for a positive integer type
 template <typename T>

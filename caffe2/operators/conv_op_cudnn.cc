@@ -15,9 +15,21 @@ static constexpr size_t kCONV_CUDNN_WORKSPACE_LIMIT_BYTES = 64 * 1024 * 1024;
 // This does not have any performance implications, as we will always find the
 // fastest algorithm; setting them to the right number of algorithms will enable
 // us to best report the statistics when doing an exhaustive search, though.
+#if CUDNN_VERSION_MIN(7,0,0)
+// Note: Double each of these due to potential
+// tensorcode + non-tensorcore versions
+// which are treated as seperate returned algos
+static constexpr size_t kNUM_CUDNN_FWD_ALGS =
+                                      2*CUDNN_CONVOLUTION_FWD_ALGO_COUNT;
+static constexpr size_t kNUM_CUDNN_BWD_FILTER_ALGS =
+                                      2*CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT;
+static constexpr size_t kNUM_CUDNN_BWD_DATA_ALGS =
+                                      2*CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT;
+#else
 static constexpr size_t kNUM_CUDNN_FWD_ALGS = 7;
 static constexpr size_t kNUM_CUDNN_BWD_FILTER_ALGS = 4;
 static constexpr size_t kNUM_CUDNN_BWD_DATA_ALGS = 5;
+#endif
 
 namespace {
 template <typename ArrayOfcudnnConvolutionAlgoPerf_t>
@@ -54,7 +66,8 @@ class CudnnConvOpBase : public ConvPoolOpBase<CUDAContext> {
         deterministic_(
             OperatorBase::GetSingleArgument<int>("deterministic", 0)),
         cudnn_state_(OperatorBase::GetSingleArgument<int>("cudnn_state", 0)),
-        force_algo_(OperatorBase::GetRepeatedArgument<int>("force_algo", vector<int>{-1,-1,-1})) {
+        force_algo_(OperatorBase::GetRepeatedArgument<int>("force_algo", vector<int>{-1,-1,-1})),
+        enable_tensor_core_(OperatorBase::GetSingleArgument<bool>("enable_tensor_core", 1)) {
     CHECK(!deterministic_ || !exhaustive_search_);
     CAFFE_ENFORCE(group_ > 0);
     CAFFE_ENFORCE(!deterministic_ || !exhaustive_search_);
@@ -190,6 +203,7 @@ class CudnnConvOpBase : public ConvPoolOpBase<CUDAContext> {
   bool deterministic_;
   size_t cudnn_state_;
   vector<int> force_algo_; // stored as FWD, dFILTER, dDATA
+  bool enable_tensor_core_;
 };
 
 
@@ -440,6 +454,16 @@ bool CudnnConvOp::DoRunWithType() {
           cudnnTypeWrapper<MATH>::type));
     }
 #endif
+
+#if CUDNN_VERSION_MIN(7,0,0)
+    // enable TensorCore math if desired
+    enable_tensor_core_ &= TensorCoreAvailable();
+    if (enable_tensor_core_) {
+      CUDNN_ENFORCE(cudnnSetConvolutionMathType(
+            conv_desc_, CUDNN_TENSOR_OP_MATH));
+    }
+#endif
+
     if (force_algo_[ALGO_FWD] >= 0) {
       algo_ = (cudnnConvolutionFwdAlgo_t)force_algo_[ALGO_FWD];
     } else if (deterministic_) {
@@ -523,8 +547,8 @@ bool CudnnConvOp::DoRunWithType() {
   if (InputSize() == 3) {
     auto& bias = Input(BIAS);
 
-    DCHECK_EQ(bias.ndim(), 1);
-    DCHECK_EQ(bias.dim32(0), M);
+    CAFFE_ENFORCE_EQ(bias.ndim(), 1);
+    CAFFE_ENFORCE_EQ(bias.dim32(0), M);
 
     CUDNN_ENFORCE(cudnnAddTensor(
         cudnn_wrapper_.inline_cudnn_handle(),
@@ -555,8 +579,8 @@ bool CudnnConvOp::RunOnDevice() {
                          float16>();   // Y
   } else {
     LOG(FATAL) << "Only float (32bit) and float16 are supported by "
-               << "cudnn convolution, but input " << def().input(0) << " has ["
-               << Input(0).meta().name() << "]";
+               << "cudnn convolution, but input " << debug_def().input(0)
+               << " has [" << Input(0).meta().name() << "]";
   }
   return true;
 }
@@ -762,6 +786,15 @@ bool CudnnConvGradientOp::DoRunWithType() {
           ones.data(),
           CUDNN_CROSS_CORRELATION,
           cudnnTypeWrapper<MATH>::type));
+    }
+#endif
+
+#if CUDNN_VERSION_MIN(7,0,0)
+    // enable TensorCore math if desired
+    enable_tensor_core_ &= TensorCoreAvailable();
+    if (enable_tensor_core_) {
+      CUDNN_ENFORCE(cudnnSetConvolutionMathType(
+            conv_desc_, CUDNN_TENSOR_OP_MATH));
     }
 #endif
     // Set the workspace

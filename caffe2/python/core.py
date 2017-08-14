@@ -15,6 +15,7 @@ from caffe2.proto import caffe2_pb2
 from collections import defaultdict
 from caffe2.python import scope, utils, workspace
 import caffe2.python._import_c_extension as C
+import google.protobuf.text_format as protobuftx
 import pickle
 import numpy as np
 import sys
@@ -245,7 +246,7 @@ def _RectifyInputOutput(blobs, net=None):
     """A helper function to rectify the input or output of the CreateOperator
     interface.
     """
-    if isinstance(blobs, string_types):
+    if isinstance(blobs, string_types) or isinstance(blobs, binary_type):
         # If blobs is a single string, prepend scope.CurrentNameScope()
         # and put it as a list.
         # TODO(jiayq): enforce using BlobReference instead of raw strings.
@@ -423,6 +424,18 @@ class IR(object):
 
         for op in operators:
             self.Play(op)
+
+        self.SanityCheck(operators)
+
+    def SanityCheck(self, operators):
+        # Validate StopGradient usage by checking that StopGradient's output
+        # is actually passed forward
+        for op in operators:
+            if op.type == 'StopGradient':
+                if op.output[0] not in self.input_usages:
+                    raise Exception("""StopGradient's output '{}' is orphan.
+You typically want to specify same input and output for
+StopGradient. Op:\n\n{}""".format(op.output[0], str(op)))
 
     def Play(self, op):
         """"Adds an op to the current IR, and update the internal states to
@@ -1149,6 +1162,55 @@ def get_op_ids_in_path(ssa, blob_versions, inputs, outputs):
     return sorted(used_op_ids)
 
 
+def recurrent_network_op_remap(op, prefix, blob_remap):
+    """
+    Parameters
+    ----------
+    op : Caffe2 operator (RecurrentNetworkOp or RecurrentNetworkGradientOp).
+    prefix: this argument is not used in this function, just for legacy support.
+    blob_remap : Dictionary that represents the map from old blob name to new.
+
+    Updates blob names in arguments of RecurrentNetworkOp and
+    RecurrentNetworkGradientOp to conform to cloned input and output of both
+    operators and also makes sure names of locally generated blobs in arguments
+    have the same prefix as the input and output of the operators.
+    """
+
+    def get_remapped_str(blob_str):
+        if isinstance(blob_str, binary_type):
+            blob_str = blob_str.decode('utf-8')
+        return blob_remap.get(blob_str, blob_str).encode('utf-8')
+
+    for argument in op.arg:
+        if len(argument.strings) > 0:
+            for i in range(len(argument.strings)):
+                argument.strings[i] = get_remapped_str(argument.strings[i])
+        elif argument.name == 'timestep':
+            argument.s = get_remapped_str(argument.s)
+        elif argument.name.endswith('step_net'):
+            # argument is a proto
+            remap_proto(argument, blob_remap)
+
+
+DEFAULT_REMAP_FUNCS = {
+    'RecurrentNetwork': recurrent_network_op_remap,
+    'RecurrentNetworkGradient': recurrent_network_op_remap,
+}
+
+
+def remap_proto(argument, blob_remap):
+    proto = caffe2_pb2.NetDef()
+    protobuftx.Merge(argument.s.decode('utf-8'), proto)
+    subnet = Net(proto)
+
+    cloned_sub_net = subnet.Clone(
+        'cloned_sub_net',
+        blob_remap,
+    )
+
+    argument.s = str(cloned_sub_net.Proto()).encode('utf-8')
+
+
 def clone_and_bind_net(net, name, prefix, blob_remap=None, inputs=None,
                        keep_schema=True):
     """
@@ -1458,8 +1520,12 @@ class Net(object):
             op_id_mask:  optional list of operator indices to include in
                          the cloned net. If not provided, all ops are included.
         """
-        if remap_funcs is None:
-            remap_funcs = {}
+        orig_remap_funcs = {} if remap_funcs is None else remap_funcs
+        # by default we want to put RecurrentNetworkOp and
+        # RecurrentNetworkGradientOp into remap_funcs, as these two operators
+        # also take blobs and proto into the arguments.
+        remap_funcs = DEFAULT_REMAP_FUNCS.copy()
+        remap_funcs.update(orig_remap_funcs)
         proto = self._net
         new_proto = caffe2_pb2.NetDef()
         new_proto.CopyFrom(proto)
@@ -1485,7 +1551,11 @@ class Net(object):
             remap_list(new_op.input)
             remap_list(new_op.output)
             if new_op.type in remap_funcs:
-                remap_funcs[new_op.type](new_op, (name + '/') if name else '')
+                remap_funcs[new_op.type](
+                    new_op,
+                    (name + '/') if name else '',
+                    blob_remap,
+                )
             return new_op
 
         del new_proto.op[:]
@@ -1549,7 +1619,8 @@ class Net(object):
         input_names = {str(k): str(v) for k, v in viewitems(inputs)}
         output_names = [str(o) for o in outputs]
         proto = self._net
-        ssa, blob_versions = get_ssa(proto)
+        blob_versions = {str(i): 0 for i in inputs}
+        ssa, blob_versions = get_ssa(proto, blob_versions)
         used_op_ids = get_op_ids_in_path(ssa, blob_versions, inputs, outputs)
         disallowed_op_ids = get_op_ids_in_path(ssa, blob_versions, [], inputs)
         assert len(set(used_op_ids) & set(disallowed_op_ids)) == 0, (
@@ -2001,7 +2072,7 @@ def copy_func_between_devices(src, dst):
         else:
             def fun(net, *args, **kw):
                 with DeviceScope(dst):
-                    return net.CopyGPUToGPU(*args, **kw)
+                    return net.Copy(*args, **kw)
             return fun
 
     if src.device_type == CUDA and dst.device_type == CPU:
@@ -2017,6 +2088,15 @@ def copy_func_between_devices(src, dst):
         return fun
 
     raise ValueError('Non-supported devices: %s and %s' % (src, dst))
+
+
+def device_equal(src, dst):
+    '''
+    We are using this fucntion instead of == operator because optional-value
+    comparison between empty device_options and {device_type:0, cuda_gpu_id:0}
+    returns not equal in some cases.
+    '''
+    return src.device_type == dst.device_type and src.cuda_gpu_id == dst.cuda_gpu_id
 
 
 class RemapEntry:
@@ -2074,7 +2154,7 @@ def InjectCrossDeviceCopies(net, blob_to_device=None):
                         format(input)
                     )
 
-            if not blob_to_device[input] == dev:
+            if not device_equal(blob_to_device[input], dev):
                 # reuse already moved input
                 if (RemapEntry(input, dev) in blob_remap and
                         blob_to_device[blob_remap[RemapEntry(input, dev)]] == dev):
@@ -2108,12 +2188,17 @@ def InjectCrossDeviceCopies(net, blob_to_device=None):
         # Enforcing no reuse blob between operators. In-place blob usage in an
         # op is allowed. This is based on the assumption that in-place op has
         # same device info
-        for out_blob in op.output:
-            if out_blob in blob_to_device and out_blob not in op.input:
+        for out_blob, device in zip(op.output, output_dev):
+            if out_blob in blob_to_device and (
+                out_blob not in op.input and
+                not device_equal(blob_to_device[out_blob], device)
+            ):
                 raise RuntimeError(
-                    "In-place blob: {} is not supported between operators. "
-                    "Failed op:\n {}".
-                    format(out_blob, op)
+                    "In-place blob: {} is not supported between operators "
+                    "with different device option previous:{} now: {}. "
+                    "Failed op:\n {}".format(
+                        out_blob, blob_to_device[out_blob], device, op
+                    )
                 )
         blob_to_device.update({o: d for d, o in zip(output_dev, op.output)})
         new_op = caffe2_pb2.OperatorDef()
@@ -2517,3 +2602,9 @@ def _extract_stacktrace():
             result.append((frame.f_code.co_filename, frame.f_lineno))
         frame = frame.f_back
     return result
+
+
+SetPerOpEnginePref = C.set_per_op_engine_pref
+SetGlobalEnginePref = C.set_global_engine_pref
+SetEnginePref = C.set_engine_pref
+SetOpEnginePref = C.set_op_engine_pref

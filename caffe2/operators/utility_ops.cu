@@ -361,7 +361,7 @@ bool NanCheckOp<CUDAContext>::RunOnDevice() {
 
   // Print out diagnostic info if we have a NaN or inf
   if (result) {
-    std::cerr << "Tensor contained NaN or inf: " << this->def().input(0)
+    std::cerr << "Tensor contained NaN or inf: " << this->debug_def().input(0)
               << std::endl;
 
     for (int j = 0; j < InputSize(); j++) {
@@ -377,8 +377,8 @@ bool NanCheckOp<CUDAContext>::RunOnDevice() {
         cpu_X.CopyFrom(Input(j), &context_);
       }
       context_.FinishDeviceComputation();
-      std::cerr << "Input tensor: " << j << ": [" << def().input(j) << "]"
-                << std::endl;
+      std::cerr << "Input tensor: " << j << ": [" << this->debug_def().input(j)
+                << "]" << std::endl;
       tensorPrinter_.Print<float>(cpu_X);
 
       if (j == 0) {
@@ -565,16 +565,16 @@ bool ScatterWeightedSumOp<float, CUDAContext>::RunOnDevice() {
 template <>
 template <typename Index>
 bool ScatterWeightedSumOp<float,CUDAContext>::DoRunWithType() {
-  DCHECK_EQ(InputSize() % 2, 1);
+  CAFFE_ENFORCE_EQ(InputSize() % 2, 1);
   auto& X0 = Input(0);
   auto& weight0 = Input(1);
   auto& indices = Input(2);
   auto* output = Output(0);
 
   CAFFE_ENFORCE_EQ(&X0, output, "In place operation is required");
-  DCHECK_GT(X0.size(), 0);
-  DCHECK_GT(X0.ndim(), 0) << "X0 has to be at least the vector";
-  DCHECK_EQ(weight0.size(), 1);
+  CAFFE_ENFORCE_GT(X0.size(), 0);
+  CAFFE_ENFORCE_GT(X0.ndim(), 0, "X0 has to be at least the vector");
+  CAFFE_ENFORCE_EQ(weight0.size(), 1);
 
   TIndex M = X0.size();
   TIndex N = X0.dim(0);
@@ -726,9 +726,7 @@ void UniqueOp<CUDAContext>::DoRun() {
         order2.data(), order1.data(), remapping, N, K);
   }
 }
-namespace {
 REGISTER_CUDA_OPERATOR(Unique, UniqueOp<CUDAContext>);
-} // namespace
 #endif // THRUST_VERSION >= 100800
 
 REGISTER_CUDA_OPERATOR(Size, SizeOp<CUDAContext>);

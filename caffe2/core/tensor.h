@@ -441,7 +441,7 @@ class Tensor {
     shares_data_ = true;
   }
 
-  bool shares_data() {
+  bool shares_data() const {
     return shares_data_;
   }
 
@@ -506,17 +506,18 @@ class Tensor {
         // destruction procedure.
         auto size = size_;
         auto dtor = meta_.dtor();
+        auto ptr_and_deleter = Context::New(size_ * meta_.itemsize());
+        auto deleter = std::move(ptr_and_deleter.second);
         data_.reset(
-            static_cast<void*>(Context::New(size_ * meta_.itemsize())),
-            [size, dtor](void* ptr) -> void {
-                dtor(ptr, size);
-                Context::Delete(ptr);
+            ptr_and_deleter.first, [size, dtor, deleter](void* ptr) -> void {
+              dtor(ptr, size);
+              deleter(ptr);
             });
         meta_.ctor()(data_.get(), size_);
       } else {
         // For fundamental type, new and delete is easier.
-        data_.reset(static_cast<void*>(Context::New(size_ * meta_.itemsize())),
-                    Context::Delete);
+        auto ptr_and_deleter = Context::New(size_ * meta_.itemsize());
+        data_.reset(ptr_and_deleter.first, std::move(ptr_and_deleter.second));
       }
       capacity_ = size_ * meta_.itemsize();
       return data_.get();
@@ -742,7 +743,7 @@ TypeMeta GetTensorType(void* c) {
 
 // Shape call registry
 typedef vector<TIndex> (*TensorInfoCall)(
-    void*,
+    const void*,
     bool* shares_data,
     size_t* capacity,
     DeviceOption* device);
@@ -751,11 +752,11 @@ void RegisterTensorInfoFunction(CaffeTypeId id, TensorInfoCall c);
 
 template <class Context>
 vector<TIndex> GetTensorInfo(
-    void* c,
+    const void* c,
     bool* shares_data,
     size_t* capacity,
     DeviceOption* device) {
-  Tensor<Context>* tc = static_cast<Tensor<Context>*>(c);
+  const Tensor<Context>* tc = static_cast<const Tensor<Context>*>(c);
   *shares_data = tc->shares_data();
   *capacity = tc->capacity_nbytes();
   device->set_device_type(CPU);
