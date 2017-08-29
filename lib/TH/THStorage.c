@@ -15,25 +15,7 @@
 
 
 THDescBuff THLongStorage_sizeDesc(const THLongStorage *size) {
-  const int L = TH_DESC_BUFF_LEN;
-  THDescBuff buf;
-  char *str = buf.str;
-  int n = 0;
-  n += snprintf(str, L-n, "[");
-  int i;
-  for(i = 0; i < size->size; i++) {
-    if(n >= L) break;
-    n += snprintf(str+n, L-n, "%ld", size->data[i]);
-    if(i < size->size-1) {
-      n += snprintf(str+n, L-n, " x ");
-    }
-  }
-  if(n < L - 2) {
-    snprintf(str+n, L-n, "]");
-  } else {
-    snprintf(str+L-5, 5, "...]");
-  }
-  return buf;
+  return _THSizeDesc(size->data, size->size);
 }
 
 THLongStorage *THLongStorage_newInferSize(THLongStorage *size, ptrdiff_t nElement)
@@ -150,6 +132,16 @@ int THLongStorage_inferExpandGeometry(long *tensorSizes, long *tensorStrides, lo
     long stride = (dim >= 0) ?
         tensorStrides[dim] : expandedSizesCalc[i + 1] * expandedStridesCalc[i+1];
     long targetSize = THLongStorage_data(sizes)[i];
+    if (targetSize == -1) {
+      if (dim < 0) {
+        THFree(expandedSizesCalc);
+        THFree(expandedStridesCalc);
+        snprintf(error_buffer, buffer_len, "The expanded size of the tensor (%ld) isn't allowed in a leading, non-existing dimension %ld.", targetSize, i);
+        return -1;
+      } else {
+        targetSize = size;
+      }
+    }
     if (size != targetSize) {
       if (size == 1) {
         size = targetSize;
