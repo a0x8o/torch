@@ -177,6 +177,7 @@ class MemongerTest(hu.HypothesisTestCase):
             "name_x/",
             share_activations=False,
         )
+        self.assertTrue(memonger.verify_graph_equality(m.Proto(), optim_proto))
         blobs_after = count_blobs(optim_proto)
         self.assertLess(blobs_after, blobs_before)
 
@@ -188,6 +189,7 @@ class MemongerTest(hu.HypothesisTestCase):
             share_activations=True,
             dont_share_blobs=set([str(input_to_grad["name_x/fc1_w"])]),
         )
+        self.assertTrue(memonger.verify_graph_equality(m.Proto(), optim_proto_wacts))
         blobs_wact_optim = count_blobs(optim_proto_wacts)
         self.assertLessEqual(blobs_wact_optim, blobs_after)
 
@@ -303,6 +305,7 @@ class MemongerTest(hu.HypothesisTestCase):
             dont_share_blobs=set(['name_x/fc6', 'name_x/fc5',
                                    str(input_to_grad["name_x/fc1_w"])]),
         )
+        self.assertTrue(memonger.verify_graph_equality(m.net.Proto(), optim_proto))
         blobs_after = count_blobs(optim_proto)
         self.assertLess(blobs_after, blobs_before)
         self.assertTrue(has_blob(optim_proto, "name_x/fc6"))
@@ -365,6 +368,7 @@ class MemongerTest(hu.HypothesisTestCase):
         optim_proto = memonger.optimize_inference_for_dag(
             m.net, ["name_x/data"], "name_x"
         )
+        self.assertTrue(memonger.verify_graph_equality(m.net.Proto(), optim_proto))
         blobs_after = count_blobs(optim_proto)
         self.assertLess(blobs_after, blobs_before)
 
@@ -422,7 +426,12 @@ class MemongerTest(hu.HypothesisTestCase):
         optim_proto = memonger.optimize_inference_for_dag(
             m.net, ["name_x/data"], "name_x/"
         )
+<<<<<<< HEAD
 
+=======
+        self.assertTrue(
+            memonger.verify_graph_equality(m.net.Proto(), optim_proto))
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
         blobs_after = count_blobs(optim_proto)
 
         # Extra test with when one of the parameters is also an input.
@@ -453,6 +462,7 @@ class MemongerTest(hu.HypothesisTestCase):
         np.testing.assert_almost_equal(loss1, optimized_loss1)
         np.testing.assert_almost_equal(loss2, optimized_loss2)
 
+<<<<<<< HEAD
     def test_rnn(self):
         from caffe2.python import rnn_cell
         T = 5
@@ -510,6 +520,8 @@ class MemongerTest(hu.HypothesisTestCase):
         workspace.RunNetOnce(model.param_init_net)
         workspace.RunNetOnce(model.net)
 
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     def test_compute_interference_graph_inplace_ops(self):
         m = model_helper.ModelHelper()
         m.Copy("b1", "b1")
@@ -727,6 +739,7 @@ class MemongerTest(hu.HypothesisTestCase):
             brew.sum(m2, [fc3a, fc3b], "out")
 
         self.assertFalse(memonger.verify_graph_equality(m.net.Proto(), m2.net.Proto()))
+<<<<<<< HEAD
 
     def test_release_blobs_when_used(self):
         m = model_helper.ModelHelper()
@@ -755,3 +768,5 @@ class MemongerTest(hu.HypothesisTestCase):
                     self.assertFalse(outp in found_frees)
 
         self.assertEqual(expect_frees, found_frees)
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3

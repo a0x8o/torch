@@ -47,7 +47,11 @@ def generate_data(T, shape, num_labels, fixed_shape):
         # Randomize the seqlength
         random_shape = (
             [np.random.randint(1, shape[0])] + shape[1:]
+<<<<<<< HEAD
             if t > 0 and not fixed_shape else shape
+=======
+            if t > 0 and not args.fixed_shape else shape
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
         )
         X = np.random.rand(*random_shape).astype(np.float32)
         batch_size = random_shape[1]
@@ -190,6 +194,7 @@ def Caffe2LSTM(args):
         workspace.RunNet(model.net.Proto().name, iters_once)
 
         new_time = time.time()
+<<<<<<< HEAD
         log.info(
             "Iter: {} / {}. Entries Per Second: {}k.".format(
                 iteration,
@@ -202,6 +207,17 @@ def Caffe2LSTM(args):
 
     log.info("Done. Total EPS excluding 1st iteration: {}k".format(
          np.sum(entry_counts[1:]) / (time.time() - start_time) // 100 / 10,
+=======
+        log.info("Iter: {} / {}. Entries Per Second: {}k.". format(
+            iteration,
+            num_iters,
+            entries_per_iter * iters_once / (new_time - last_time) // 100 / 10,
+        ))
+        last_time = new_time
+
+    log.info("Done. Total EPS excluding 1st iteration: {}k".format(
+        total_iters * entries_per_iter / (time.time() - start_time) // 100 / 10,
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     ))
 
     if (args.gpu):

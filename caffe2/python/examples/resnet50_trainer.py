@@ -485,11 +485,14 @@ def main():
                         help="Load previously saved model to continue training")
     parser.add_argument("--use_cpu", type=bool, default=False,
                         help="Use CPU instead of GPU")
+<<<<<<< HEAD
     parser.add_argument('--dtype', default='float',
                         choices=['float', 'float16'],
                         help='Data type used for training')
     parser.add_argument('--enable-tensor-core', action='store_true',
                         help='Enable Tensor Core math for Conv and FC ops')
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
     args = parser.parse_args()
 

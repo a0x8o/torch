@@ -15,6 +15,7 @@
 namespace caffe2 {
 
 OperatorBase::OperatorBase(const OperatorDef& operator_def, Workspace* ws)
+<<<<<<< HEAD
     : operator_ws_(ws),
       operator_def_(std::make_shared<OperatorDef>(operator_def)),
       device_option_(
@@ -22,6 +23,10 @@ OperatorBase::OperatorBase(const OperatorDef& operator_def, Workspace* ws)
                                            : DeviceOption()),
       event_(device_option_) {
   for (const string& input_str : operator_def.input()) {
+=======
+    : operator_def_(operator_def), arg_helper_(operator_def_) {
+  for (const string& input_str : operator_def_.input()) {
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     auto* blob = ws->GetBlob(input_str);
     CAFFE_ENFORCE(
         blob != nullptr,
@@ -83,9 +88,10 @@ unique_ptr<OperatorBase> TryCreateOperator(
   }
 }
 
-unique_ptr<OperatorBase> _CreateOperator(
-    const OperatorDef& operator_def,
-    Workspace* ws) {
+}  // namespace
+
+unique_ptr<OperatorBase> CreateOperator(
+    const OperatorDef& operator_def, Workspace* ws) {
   static StaticLinkingProtector g_protector;
   const auto op_type = operator_def.type();
   const auto device_type = operator_def.device_option().device_type();
@@ -156,6 +162,7 @@ unique_ptr<OperatorBase> _CreateOperator(
   return op;
 }
 
+<<<<<<< HEAD
 } // namespace
 
 void SetPerOpEnginePref(const PerOpEnginePrefType& per_op_engine_pref) {
@@ -242,6 +249,8 @@ unique_ptr<OperatorBase> CreateOperator(
   }
 }
 
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 std::map<int32_t, OperatorRegistry*>* gDeviceTypeRegistry() {
   static std::map<int32_t, OperatorRegistry*> g_device_type_registry;
   return &g_device_type_registry;

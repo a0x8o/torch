@@ -813,6 +813,7 @@ class TestLayers(LayersTestCase):
 
         schema.FeedRecord(input_record, [X])
         workspace.RunNetOnce(predict_net)
+<<<<<<< HEAD
 
     @given(
         num_inputs=st.integers(1, 3),
@@ -1283,3 +1284,5 @@ class TestLayers(LayersTestCase):
         # Eval net assertions
         eval_net = self.get_eval_net()
         self.assertNetContainOps(eval_net, [conv_spec])
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3

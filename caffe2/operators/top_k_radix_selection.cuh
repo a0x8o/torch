@@ -167,11 +167,15 @@ __device__ void countRadixUsingMask(CountType counts[RadixSize],
 #pragma unroll
     for (unsigned int j = 0; j < RadixSize; ++j) {
       bool vote = hasVal && (digitInRadix == j);
+<<<<<<< HEAD
 #if CUDA_VERSION >= 9000
       counts[j] += __popc(__ballot_sync(__activemask(), vote));
 #else
       counts[j] += __popc(__ballot(vote));
 #endif
+=======
+      counts[j] += __popc(__ballot(vote));
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     }
   }
 
@@ -360,7 +364,11 @@ __global__ void gatherTopK(const T* inputPtr,
   // Find the start offset for our slice
   const T* inputSliceStart = &inputPtr[slice * inputSliceSize];
   T* topKSliceStart = &topKPtr[slice * outputSliceSize];
+<<<<<<< HEAD
   caffe2::TIndex* indicesSliceStart = &indicesPtr[slice * outputSliceSize];
+=======
+  long* indicesSliceStart = &indicesPtr[slice * outputSliceSize];
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
   // Find the k-th highest element in our input
   T topKValue = (T)0;

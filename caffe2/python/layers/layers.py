@@ -125,6 +125,7 @@ class LayerParameter(object):
         self.initializer = initializer
         self.ps_param = ps_param
 
+<<<<<<< HEAD
     @property
     def initializer(self):
         return self._initializer
@@ -168,6 +169,8 @@ class LayerParameter(object):
     def __str__(self):
         return str(self.parameter)
 
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 def is_request_only_scalar(scalar):
     if len(scalar.field_metadata()) == 0:
@@ -296,6 +299,7 @@ class ModelLayer(object):
             # so extend is used
             if param.initializer:
                 init_net._net.op.extend([param.initializer])
+<<<<<<< HEAD
 
     def create_param(self, param_name, shape, initializer, optimizer,
                        ps_param=None):
@@ -311,6 +315,8 @@ class ModelLayer(object):
     def get_next_blob_reference(self, name):
         with scope.NameScope(self.name, reset=True):
             return self.model.net.NextScopedBlob(name)
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
     def add_operators(self, net, init_net=None,
                       context=InstantiationContext.TRAINING):

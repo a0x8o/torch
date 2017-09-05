@@ -153,7 +153,11 @@ bool MaxGradientOp<float, CUDAContext>::RunOnDevice() {
   auto& grad_output = Input(1);
   const int kInputStartOffset = 2;
 
+<<<<<<< HEAD
   const float* data = output.data<float>();
+=======
+  const float* data = output.template data<float>();
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
   for (int i = 0; i < OutputSize(); i++) {
     auto& input = Input(i + kInputStartOffset);

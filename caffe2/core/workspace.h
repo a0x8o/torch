@@ -233,9 +233,12 @@ class Workspace {
   bool RunOperatorOnce(const OperatorDef& op_def);
   bool RunNetOnce(const NetDef& net_def);
 
+<<<<<<< HEAD
  public:
   std::atomic<int> last_failed_op_net_position;
 
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
  private:
   BlobMap blob_map_;
   NetMap net_map_;

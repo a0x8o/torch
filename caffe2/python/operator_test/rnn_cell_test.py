@@ -839,6 +839,7 @@ class RNNCellTest(hu.HypothesisTestCase):
         gradient_checker.NetGradientChecker.CompareNets(
             nets, outputs, outputs_with_grads,
             inputs_with_grads=inputs[0],
+<<<<<<< HEAD
         )
 
     @given(
@@ -913,6 +914,8 @@ class RNNCellTest(hu.HypothesisTestCase):
             [0],
             inputs_with_grads=inputs_with_grads,
             threshold=0.000001,
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
         )
 
     @given(

@@ -3,6 +3,55 @@
 #include "caffe2/core/tensor.h"
 
 namespace caffe2 {
+<<<<<<< HEAD
+=======
+namespace {
+
+template <class Context>
+class BooleanUnmaskOp final : public Operator<Context> {
+ public:
+  USE_OPERATOR_CONTEXT_FUNCTIONS;
+  BooleanUnmaskOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator<Context>(operator_def, ws) {}
+
+  bool RunOnDevice() override {
+    int maskSize = Input(0).size();
+    int numMasks = InputSize() / 2;
+    auto* valuesOut = Output(0);
+    auto& valueMeta = Input(1).meta();
+    validateInput(numMasks, maskSize);
+
+    valuesOut->Resize(maskSize);
+    auto* valuesOutPtr = (char*)valuesOut->raw_mutable_data(valueMeta);
+
+    std::vector<int> nextValueIndices(numMasks, 0);
+    for (int maskOffset = 0; maskOffset < maskSize; ++maskOffset) {
+      bool maskFound = false;
+      for (int maskIndex = 0; maskIndex < numMasks; ++maskIndex) {
+        auto& mask = Input(maskIndex * 2);
+        auto& values = Input(maskIndex * 2 + 1);
+        const auto* maskPtr = mask.template data<bool>();
+        const auto* valuesPtr = (char*)values.raw_data();
+        if (maskPtr[maskOffset]) {
+          auto& valueIndex = nextValueIndices[maskIndex];
+          CAFFE_ENFORCE_LT(valueIndex, values.size());
+          auto* src = valuesPtr + (valueIndex++) * valueMeta.itemsize();
+          auto* dst = valuesOutPtr + maskOffset * valueMeta.itemsize();
+          std::copy(src, src + valueMeta.itemsize(), dst);
+          maskFound = true;
+          break;
+        }
+      }
+      CAFFE_ENFORCE(maskFound);
+    }
+    // check all indices match value length
+    for (int i = 0; i < numMasks; ++i) {
+      auto& values = Input(i * 2 + 1);
+      CAFFE_ENFORCE_EQ(values.size(), nextValueIndices[i]);
+    }
+    return true;
+  }
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 template <>
 bool BooleanUnmaskOp<CPUContext>::RunOnDevice() {

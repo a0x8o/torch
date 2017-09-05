@@ -19,6 +19,7 @@ import pickle
 import numpy as np
 import sys
 
+
 # Mac os specific message
 if (sys.platform == 'darwin' and 'leveldb' in C.registered_dbs()):
     print('If you are using homebrew leveldb on a Mac OS, you might see an '
@@ -1672,6 +1673,7 @@ class Net(object):
         self._InvalidateLookupTables()
         return self._net
 
+<<<<<<< HEAD
     def PopulateProtoWithFileName(self):
         net_tb = workspace.operator_tracebacks.get(self.Name(), None)
         if net_tb is not None:
@@ -1679,6 +1681,8 @@ class Net(object):
                 if idx in net_tb:
                     op.name = ':'.join(map(str, net_tb[idx][0]))
 
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     def NextScopedBlob(self, prefix='unnamed'):
         """Return the blob that has not been defined or registered in the
         current net. It returns `ScopedBlobReference(prefix)`, if it's valid,
@@ -2619,8 +2623,12 @@ def execution_step(default_name,
                    should_stop_blob=None,
                    only_once=None,
                    num_concurrent_instances=None,
+<<<<<<< HEAD
                    create_workspace=False,
                    run_every_ms=None):
+=======
+                   create_workspace=False):
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     """
     Helper for creating an ExecutionStep.
     - steps_or_nets can be:
@@ -2656,8 +2664,11 @@ def execution_step(default_name,
         step.SetNumConcurrentInstances(num_concurrent_instances)
     if create_workspace:
         step.SetCreateWorkspace(True)
+<<<<<<< HEAD
     if run_every_ms:
         step.RunEveryMillis(run_every_ms)
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
     if isinstance(steps_or_nets, ExecutionStep):
         step.AddSubstep(steps_or_nets)

@@ -9,7 +9,13 @@ namespace caffe2 {
 template <class T>
 class ObserverBase {
  public:
+<<<<<<< HEAD
   explicit ObserverBase(T* subject) : subject_(subject) {}
+=======
+  explicit ObserverBase(T* subject) : subject_(subject) {
+    subject_->SetObserver(this);
+  }
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
   virtual bool Start() {
     return false;

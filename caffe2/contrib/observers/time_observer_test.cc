@@ -61,6 +61,7 @@ TEST(TimeObserverTest, Test3Seconds) {
   Workspace ws;
   ws.CreateBlob("in");
   NetDef net_def;
+<<<<<<< HEAD
   unique_ptr<NetBase> net(CreateNetTestHelper(&ws));
   unique_ptr<TimeObserver<NetBase>> net_ob =
       make_unique<TimeObserver<NetBase>>(net.get());
@@ -74,5 +75,15 @@ TEST(TimeObserverTest, Test3Seconds) {
   CAFFE_ENFORCE(ob->average_time_children() < 3500);
   CAFFE_ENFORCE(ob->average_time() > 6000);
   CAFFE_ENFORCE(ob->average_time() < 6500);
+=======
+  unique_ptr<NetBase> net(CreateNetTestHelper(&ws, {"in"}, {"out"}));
+  unique_ptr<TimeObserver<NetBase>> net_ob =
+      make_unique<TimeObserver<NetBase>>(net.get());
+  net.get()->Run();
+  CAFFE_ENFORCE(net_ob.get()->average_time_children() > 3000);
+  CAFFE_ENFORCE(net_ob.get()->average_time_children() < 3500);
+  CAFFE_ENFORCE(net_ob.get()->average_time() > 6000);
+  CAFFE_ENFORCE(net_ob.get()->average_time() < 6500);
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 }
 }

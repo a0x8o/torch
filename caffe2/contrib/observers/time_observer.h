@@ -13,7 +13,11 @@ namespace caffe2 {
 template <class T>
 class TimeObserver final : public ObserverBase<T> {
  public:
+<<<<<<< HEAD
   explicit TimeObserver<T>(T* subject) : ObserverBase<T>(subject) {}
+=======
+  explicit TimeObserver<T>(T* subject_) : ObserverBase<T>(subject_) {}
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   inline float average_time() const {
     return total_time_ / iterations_;
   }

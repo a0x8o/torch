@@ -112,11 +112,15 @@ warpHeap(K k, V v, K& keyHeapHead, K* keyHeap, V* valueHeap) {
   bool wantInsert = Dir ? (k > keyHeapHead) : (k < keyHeapHead);
 
   // Find out all the lanes that have elements to add to the heap
+<<<<<<< HEAD
 #if CUDA_VERSION >= 9000
   unsigned int vote = __ballot_sync(__activemask(), wantInsert);
 #else
   unsigned int vote = __ballot(wantInsert);
 #endif
+=======
+  unsigned int vote = __ballot(wantInsert);
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
   if (!vote) {
     // Everything the warp has is smaller than our heap

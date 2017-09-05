@@ -427,17 +427,23 @@ constexpr T roundUp(T a, T b) {
 }
 
 // Returns true if the given integer type is a power-of-2 (positive only)
+<<<<<<< HEAD
 // Note(jiayq): windows reported an error per
 //     https://github.com/caffe2/caffe2/issues/997
 // and as a result will make it a macro.
 #ifdef _MSC_VER
 #define integerIsPowerOf2(v) ((v) && !((v) & ((v) - 1)))
 #else // _MSC_VER
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 template <typename T>
 constexpr bool integerIsPowerOf2(T v) {
   return (v && !(v & (v - 1)));
 }
+<<<<<<< HEAD
 #endif // _MSC_VER
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 // Returns log2(n) for a positive integer type
 template <typename T>

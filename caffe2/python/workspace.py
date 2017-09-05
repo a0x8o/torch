@@ -37,8 +37,11 @@ Workspaces = C.workspaces
 BenchmarkNet = C.benchmark_net
 Predictor = C.Predictor
 
+<<<<<<< HEAD
 operator_tracebacks = defaultdict(dict)
 
+=======
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 is_asan = C.is_asan
 has_gpu_support = C.has_gpu_support
 if has_gpu_support:
@@ -140,6 +143,7 @@ def CreateNet(net, overwrite=False, input_blobs=None):
         input_blobs = []
     for input_blob in input_blobs:
         C.create_blob(input_blob)
+<<<<<<< HEAD
     return CallWithExceptionIntercept(
         C.create_net,
         C.Workspace.current._last_failed_op_net_position,
@@ -147,6 +151,9 @@ def CreateNet(net, overwrite=False, input_blobs=None):
         StringifyProto(net), overwrite,
     )
 
+=======
+    return C.create_net(StringifyProto(net), overwrite)
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 
 def RunOperatorOnce(operator):
@@ -161,6 +168,7 @@ def RunOperatorsOnce(operators):
     return True
 
 
+<<<<<<< HEAD
 def CallWithExceptionIntercept(func, op_id_fetcher, net_name, *args, **kwargs):
     try:
         return func(*args, **kwargs)
@@ -182,6 +190,10 @@ def RunNetOnce(net):
         GetNetName(net),
         StringifyProto(net),
     )
+=======
+def RunNetOnce(net):
+    return C.run_net_once(StringifyProto(net))
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 
 def RunNet(name, num_iter=1, allow_fail=False):
@@ -194,12 +206,16 @@ def RunNet(name, num_iter=1, allow_fail=False):
     Returns:
       True or an exception.
     """
+<<<<<<< HEAD
     return CallWithExceptionIntercept(
         C.run_net,
         C.Workspace.current._last_failed_op_net_position,
         GetNetName(name),
         StringifyNetName(name), num_iter, allow_fail,
     )
+=======
+    return C.run_net(StringifyNetName(name), num_iter, allow_fail)
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 
 def RunPlan(plan_or_step):
@@ -535,6 +551,7 @@ def FeedImmediate(*args, **kwargs):
 
 # CWorkspace utilities
 
+<<<<<<< HEAD
 def _Workspace_create_net_with_exception_intercept(ws, net, overwrite=False):
     return CallWithExceptionIntercept(
         ws._create_net,
@@ -542,9 +559,13 @@ def _Workspace_create_net_with_exception_intercept(ws, net, overwrite=False):
         GetNetName(net),
         StringifyProto(net), overwrite,
     )
+=======
+def _Workspace_create_net(ws, net, overwrite=False):
+    return ws._create_net(StringifyProto(net), overwrite)
+>>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 
-C.Workspace.create_net = _Workspace_create_net_with_exception_intercept
+C.Workspace.create_net = _Workspace_create_net
 
 
 def _Workspace_run(ws, obj):
