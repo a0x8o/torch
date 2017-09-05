@@ -100,11 +100,28 @@ class OperatorBase {
   inline int OutputSize() { return outputs_.size(); }
   inline const vector<const Blob*>& Inputs() const { return inputs_; }
   inline const vector<Blob*>& Outputs() { return outputs_; }
+  vector<TensorShape> InputTensorShapes();
+
+  virtual void WaitEvent(const Event& ev) {
+    CAFFE_NOT_IMPLEMENTED;
+  }
+
+  inline void Wait(const OperatorBase& other) {
+    WaitEvent(other.event());
+  }
+
+  virtual void Record() {
+    CAFFE_NOT_IMPLEMENTED;
+  }
 
   virtual bool Run(int /* unused */ /*stream_id*/ = 0) {
     CAFFE_NOT_IMPLEMENTED;
   }
 
+  // RunAsync, if implemenented by the specific operators, will schedule the
+  // computation on the corresponding context and record the event in its
+  // event_ member object. If the specific operator does not support RunAsync,
+  // it will simply be synchronous as a fallback.
   virtual bool RunAsync(int /* unused */ stream_id = 0) {
     return Run(stream_id);
   }
@@ -181,6 +198,10 @@ class OperatorBase {
     return device_option_;
   }
 
+  const Event& event() const {
+    return event_;
+  }
+
  public:
   static constexpr int kNoNetPositionSet = -1;
 
@@ -188,17 +209,19 @@ class OperatorBase {
     return observer_.get();
   }
 
- protected:
-  Workspace* operator_ws_;
-  std::unique_ptr<ObserverBase<OperatorBase>> observer_;
-
  private:
+  Workspace* operator_ws_;
   std::shared_ptr<const OperatorDef> operator_def_;
   DeviceOption device_option_;
   vector<const Blob*> inputs_;
   vector<Blob*> outputs_;
 
   int net_position_{kNoNetPositionSet};
+
+ protected:
+  std::unique_ptr<ObserverBase<OperatorBase>> observer_;
+  // An event used by asynchronous execution.
+  Event event_;
 
   DISABLE_COPY_AND_ASSIGN(OperatorBase);
 };
@@ -252,6 +275,16 @@ class Operator : public OperatorBase {
     return OperatorBase::template Output<Tensor<Context>>(idx);
   }
 
+  void WaitEvent(const Event& ev) final {
+    context_.SwitchToDevice();
+    context_.WaitEvent(ev);
+  }
+
+  void Record() final {
+    context_.SwitchToDevice();
+    context_.Record(&event_);
+  }
+
   // The run function of Operator switches to the device, and then carries out
   // the actual computation with RunOnDevice(). You should implement RunOnDevice
   // instead of Run().
@@ -291,6 +324,7 @@ class Operator : public OperatorBase {
       if (!result) {
         this->RecordLastFailedOpNetPosition();
       }
+      context_.Record(&event_);
       return result;
     } catch (EnforceNotMet& err) {
       if (has_debug_def()) {

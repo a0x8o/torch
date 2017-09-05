@@ -14,7 +14,7 @@ function(custom_protobuf_find)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations" PARENT_SCOPE)
   endif()
   add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/protobuf/cmake)
-  include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/third_party/protobuf/src)
+  caffe2_include_directories(${PROJECT_SOURCE_DIR}/third_party/protobuf/src)
   list(APPEND Caffe2_DEPENDENCY_LIBS libprotobuf)
   set(Caffe2_DEPENDENCY_LIBS ${Caffe2_DEPENDENCY_LIBS} PARENT_SCOPE)
   if(NOT EXISTS ${PROTOBUF_PROTOC_EXECUTABLE})
@@ -26,6 +26,7 @@ function(custom_protobuf_find)
     message(STATUS "Using protobuf compiler ${PROTOBUF_PROTOC_EXECUTABLE}.")
   endif()
   set(Protobuf_FOUND TRUE PARENT_SCOPE)
+  set(Caffe2_IS_CUSTOM_PROTOBUF TRUE PARENT_SCOPE)
 endfunction()
 
 if (WIN32)
@@ -38,11 +39,16 @@ if (WIN32)
   endif()
 elseif (ANDROID OR IOS)
   custom_protobuf_find()
-  # For Androd or iOS, we won't need to build the libprotoc and protoc binaries
-  # because we will use the host protoc to build the proto files.
-  set_target_properties(
-      libprotoc protoc PROPERTIES
-      EXCLUDE_FROM_ALL 1 EXCLUDE_FROM_DEFAULT_BUILD 1)
+  if (IOS_PLATFORM STREQUAL "WATCHOS")
+    # Unfortunately, WatchOS does not support building libprotoc and protoc,
+    # so we will need to exclude it. The problem of using EXCLUDE_FROM_ALL is
+    # that one is not going to be able to run cmake install. A proper solution
+    # has to be implemented by protobuf since we derive our cmake files from
+    # there.
+    set_target_properties(
+        libprotoc protoc PROPERTIES
+        EXCLUDE_FROM_ALL 1 EXCLUDE_FROM_DEFAULT_BUILD 1)
+  endif()
 else()
   find_package( Protobuf )
   if ( NOT (Protobuf_FOUND OR PROTOBUF_FOUND) )
@@ -50,7 +56,7 @@ else()
   else()
     # Adding PROTOBUF_LIBRARY for legacy support.
     list(APPEND Caffe2_DEPENDENCY_LIBS ${PROTOBUF_LIBRARIES} ${PROTOBUF_LIBRARY})
-    include_directories(SYSTEM ${PROTOBUF_INCLUDE_DIR})
+    caffe2_include_directories(${PROTOBUF_INCLUDE_DIR})
   endif()
 endif()
 

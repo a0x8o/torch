@@ -38,19 +38,20 @@ const char* GLAdd::fragment_shader = R"GLSL(#version 300 es
 
 precision mediump float;
 precision mediump int;
-precision mediump sampler2D;
 
 in highp vec2 v_texCoord;
 
 uniform ivec2 outputSize;
 
-uniform sampler2D inputData[2];
-
-layout(location = 0) out mediump vec4 outputData;
+TEXTURE_INPUT(inputData[2]);
+TEXTURE_OUTPUT(0, outputData);
 
 void main() {
     ivec2 texelCoord = ivec2(v_texCoord * vec2(outputSize));
-    outputData = texelFetch(inputData[0], texelCoord, 0) + texelFetch(inputData[1], texelCoord, 0);
+    vec4 A = TEXTURE_LOAD(inputData[0], texelCoord);
+    vec4 B = TEXTURE_LOAD(inputData[1], texelCoord);
+    vec4 value = A + B;
+    outputData = TEXTURE_STORE(value);
 }
 
 )GLSL";
@@ -74,9 +75,9 @@ void GLAdd::add(const GLImageVector<T>& input_images0,
 
       run(input_attachments,
           {output_image->textures.begin() + is, output_image->textures.begin() + is + 1},
-          [&]() { glUniform2i(outputSize->location, output_image->width, output_image->height); },
-          output_image->width,
-          output_image->height);
+          [&]() { glUniform2i(outputSize->location, output_image->texture_width, output_image->texture_height); },
+          output_image->texture_width,
+          output_image->texture_height);
     }
   }
 }
@@ -90,8 +91,7 @@ class OpenGLAddOp final : public Operator<CPUContext>, ImageAllocator<T> {
     OPERATOR_NEEDS_FEATURE(OperatorBase::HasArgument("broadcast") == false,
                            "OpenGLAdd does not support broadcast");
 
-    OPERATOR_NEEDS_FEATURE(OperatorBase::HasArgument("axis") == false,
-                           "OpenGLMul does not support axis");
+    OPERATOR_NEEDS_FEATURE(OperatorBase::HasArgument("axis") == false, "OpenGLAdd does not support axis");
   }
 
   bool RunOnDevice() override {
@@ -104,18 +104,25 @@ class OpenGLAddOp final : public Operator<CPUContext>, ImageAllocator<T> {
     const int input_channels = input0.channels();
     const int input_width = input0.width();
     const int input_height = input0.height();
+    const int input_tile_x   = input0.tile_x();
+    const int input_tile_y   = input0.tile_y();
+
     CAFFE_ENFORCE_EQ(input1.channels(), input_channels);
     CAFFE_ENFORCE_EQ(input1.width(), input_width);
     CAFFE_ENFORCE_EQ(input1.height(), input_height);
+    CAFFE_ENFORCE_EQ(input1.tile_x(), input_tile_x);
+    CAFFE_ENFORCE_EQ(input1.tile_y(), input_tile_y);
 
     const int output_channels = input_channels;
     const int output_width = input_width;
     const int output_height = input_height;
+    const int output_tile_x   = input_tile_x;
+    const int output_tile_y   = input_tile_y;
 
     int is_last = OperatorBase::GetSingleArgument<int>("is_last", 0);
 
     GLImageVector<T>* output = ImageAllocator<T>::newImage(
-        num_images, output_width, output_height, output_channels, is_last);
+        num_images, output_width, output_height, output_channels, output_tile_x, output_tile_y, is_last);
 
     if (!_add) {
       _add.reset(new GLAdd());

@@ -779,9 +779,9 @@ def GetLearningRateBlobNames(model):
     '''
     if model._optimizer is not None:
         if model._device_type == caffe2_pb2.CPU:
-            return [model._optimizer.get_cpu_lr_blob_name()]
+            return [model._optimizer.get_cpu_blob_name('lr')]
         elif model._device_type == caffe2_pb2.CUDA:
-            return [model._optimizer.get_gpu_lr_blob_name(gpu)
+            return [model._optimizer.get_gpu_blob_name('lr', gpu)
                     for gpu in model._devices]
         else:
             raise Exception(
@@ -1425,16 +1425,19 @@ def OptimizeGradientMemory(model,
                    that you will access externally.
     recycle_activations: whether to also recycle forward pass activations
     """
-    input_shapes_all_devices = {}
-    for b, shp in viewitems(input_shapes):
-        for d in model._devices:
-            input_shapes_all_devices["{}_{}/{}".
-                                     format(model._device_prefix, d, b)] = shp
+    if input_shapes is not None:
+        input_shapes_all_devices = {}
+        for b, shp in viewitems(input_shapes):
+            for d in model._devices:
+                input_shapes_all_devices["{}_{}/{}".
+                                         format(model._device_prefix, d, b)] = shp
 
-    (shapes, types) = workspace.InferShapesAndTypes(
-        [model.param_init_net, model.net],
-        input_shapes_all_devices,
-    )
+        (shapes, types) = workspace.InferShapesAndTypes(
+            [model.param_init_net, model.net],
+            input_shapes_all_devices,
+        )
+    else:
+        shapes = None
 
     for device in model._devices:
         namescope = "{}_{}/".format(model._device_prefix, device)

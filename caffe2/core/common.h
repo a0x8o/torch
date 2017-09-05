@@ -159,6 +159,7 @@ make_unique(Args&&...) = delete;
 // to_string implementation for Android related stuff.
 #ifndef __ANDROID__
 using std::to_string;
+using std::stoi;
 #else
 template <typename T>
 std::string to_string(T value)
@@ -166,6 +167,15 @@ std::string to_string(T value)
   std::ostringstream os;
   os << value;
   return os.str();
+}
+
+inline int stoi(const string& str)
+{
+  std::stringstream ss;
+  int n = 0;
+  ss << str;
+  ss >> n;
+  return n;
 }
 #endif
 
@@ -207,6 +217,19 @@ class SkipIndices<> {
     return false;
   }
 };
+
+// A global variable to mark if Caffe2 has cuda linked to the current runtime.
+// Do not directly use this variable, but instead use the HasCudaRuntime()
+// function below.
+extern bool g_caffe2_has_cuda_linked;
+
+// HasCudaRuntime() tells the program whether the binary has Cuda runtime
+// linked. This function should not be used in static initialization functions
+// as the underlying boolean variable is going to be switched on when one
+// loads libcaffe2_gpu.so.
+inline bool HasCudaRuntime() {
+  return g_caffe2_has_cuda_linked;
+}
 
 }  // namespace caffe2
 

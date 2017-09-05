@@ -13,6 +13,8 @@ class GLTexture {
 
     int dataSize() const {
       switch (type) {
+      case GL_UNSIGNED_INT:
+        return 4;
       case GL_HALF_FLOAT:
         return 2;
       case GL_UNSIGNED_BYTE:
@@ -29,6 +31,7 @@ class GLTexture {
       case GL_RG8:
         return 2;
       // case GL_BGRA:
+      case GL_RG_INTEGER:
       case GL_RGBA:
         return 4;
       default:
@@ -38,6 +41,7 @@ class GLTexture {
   };
 
   static const Type FP16;
+  static const Type FP16_COMPAT;
   static const Type UI8;
 
  protected:

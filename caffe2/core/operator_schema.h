@@ -165,8 +165,8 @@ class OpSchema {
    * an operator such as FLOPs and total memory use.
    */
   struct Cost {
-    size_t flops; // Floating point operations.
-    size_t bytes_moved; // Total memory used.
+    uint64_t flops; // Floating point operations.
+    uint64_t bytes_moved; // Total memory used.
   };
   /**
    * @brief Registers a function that takes in an OperatorDef
@@ -180,11 +180,16 @@ class OpSchema {
   /**
    * @brief Register the Cost inference function.
    */
-  OpSchema& CostInferenceFunction(CostInferenceFunctionType function);
+  OpSchema& CostInferenceFunction(CostInferenceFunctionType&& function);
+  bool HasCostInferenceFunction() const {
+    return !!cost_inference_function_;
+  }
   inline struct Cost InferCost(
       const OperatorDef& def,
       const vector<TensorShape>& input_tensor_shape) const {
-    return cost_inference_function_(def, input_tensor_shape);
+    CAFFE_ENFORCE(
+        cost_inference_function_, "Cost inference function not defined.");
+    return (*cost_inference_function_)(def, input_tensor_shape);
   }
 
   // Functions to do documentation for the operator schema.
@@ -244,13 +249,6 @@ class OpSchema {
   }
 
  private:
-  [[noreturn]] Cost DefaultConstInferenceFunction(
-      const OperatorDef&,
-      const vector<TensorShape>&) {
-    CAFFE_THROW("No cost inference function registered.");
-  }
-
- private:
   string file_;
   string doc_;
   std::vector<std::pair<const char*, const char*>> arg_desc_{};
@@ -285,11 +283,7 @@ class OpSchema {
         }
         return out;
       };
-  CostInferenceFunctionType cost_inference_function_ = std::bind(
-      &OpSchema::DefaultConstInferenceFunction,
-      this,
-      std::placeholders::_1,
-      std::placeholders::_2);
+  std::unique_ptr<CostInferenceFunctionType> cost_inference_function_ = nullptr;
   DeviceInferenceFunctionType device_inference_function_ =
       [](const OperatorDef& def) {
         auto op_device =
@@ -348,8 +342,9 @@ class OpSchemaRegistry {
 };
 
 // Helper function for creating simple tensorproto with dimension and type
+template <typename T_I = int>
 inline TensorShape CreateTensorShape(
-    vector<int> dims,
+    vector<T_I> dims,
     ::caffe2::TensorProto_DataType dt) {
   TensorShape ts;
   for (int d : dims) {
@@ -380,12 +375,26 @@ InferOpInputOutputDevice(const OperatorDef& op) {
 
 }  // namespace caffe2
 
+#ifndef CAFFE2_NO_OPERATOR_SCHEMA
+
 #define OPERATOR_SCHEMA(name)                            \
   void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
-  static OpSchema& CAFFE_ANONYMOUS_VARIABLE(name) =      \
-      OpSchemaRegistry::NewSchema(#name, __FILE__, __LINE__)
+  static OpSchema* CAFFE_ANONYMOUS_VARIABLE(name) =      \
+      &OpSchemaRegistry::NewSchema(#name, __FILE__, __LINE__)
 #define OPERATOR_SCHEMA_STR(name)                                  \
-  static OpSchema& CAFFE_ANONYMOUS_VARIABLE(schema_registration) = \
-      OpSchemaRegistry::NewSchema(name, __FILE__, __LINE__)
+  static OpSchema* CAFFE_ANONYMOUS_VARIABLE(schema_registration) = \
+      &OpSchemaRegistry::NewSchema(name, __FILE__, __LINE__)
+
+#else // CAFFE2_NO_OPERATOR_SCHEMA
+
+#define OPERATOR_SCHEMA(name)                            \
+  void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(){}; \
+  static OpSchema* CAFFE_ANONYMOUS_VARIABLE(name) =      \
+      1 ? nullptr : &OpSchemaRegistry::NewSchema(#name, __FILE__, __LINE__)
+#define OPERATOR_SCHEMA_STR(name)                                  \
+  static OpSchema* CAFFE_ANONYMOUS_VARIABLE(schema_registration) = \
+      1 ? nullptr : &OpSchemaRegistry::NewSchema(name, __FILE__, __LINE__)
+
+#endif // CAFFE2_NO_OPERATOR_SCHEMA
 
 #endif  // CAFFE2_CORE_OPERATOR_SCHEMA_H_

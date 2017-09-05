@@ -251,7 +251,7 @@ void dumpDefForOpenGL(const NetDef& d) {
 //  }
 //}
 
-NetDef rewritePredictNetForOpenGL(const NetDef& predictNet, bool useTextureInput) {
+NetDef rewritePredictNetForOpenGL(const NetDef& predictNet, bool useTextureInput, bool useTiling, bool runFusion) {
   CAFFE_ENFORCE_GE(predictNet.op_size(), 1);
   NetDef net;
   net.CopyFrom(predictNet);
@@ -288,6 +288,12 @@ NetDef rewritePredictNetForOpenGL(const NetDef& predictNet, bool useTextureInput
     if (opKeySet.find(openGLOp) != opKeySet.end()) {
       op->set_type(openGLOp);
       openGLOps.insert(openGLOp);
+
+      if (useTiling) {
+        auto* arg = op->add_arg();
+        arg->set_name("tiling");
+        arg->set_i(1);
+      }
     } else {
       needCopyOps = true;
     }
@@ -297,7 +303,9 @@ NetDef rewritePredictNetForOpenGL(const NetDef& predictNet, bool useTextureInput
     CAFFE_THROW("OpenGL operator missing");
   }
 
-  net = runOpenGLFusion(net, openGLOps);
+  if (runFusion) {
+    net = runOpenGLFusion(net, openGLOps);
+  }
 
   if (net.op(0).type() == replacements["OpenGLPackedInt8BGRANHWCToNCHWCStylizerPreprocess"]) {
     // For end-to-end testing
@@ -314,7 +322,9 @@ NetDef rewritePredictNetForOpenGL(const NetDef& predictNet, bool useTextureInput
       copy_op->add_output(net.external_output(0));
     }
   } else {
-    needCopyOps = true;
+    if (!useTextureInput) {
+      needCopyOps = true;
+    }
   }
 
   // copy ops are needed when the input is not a texture
@@ -329,10 +339,12 @@ NetDef rewritePredictNetForOpenGL(const NetDef& predictNet, bool useTextureInput
 bool tryConvertToOpenGL(const NetDef& initNet,
                         const NetDef& predictNet,
                         NetDef* glPredictNet,
-                        bool useTextureInput) {
+                        bool useTextureInput,
+                        bool useTiling,
+                        bool runFusion) {
   try {
     // Throws if unsupported operators are found.
-    *glPredictNet = rewritePredictNetForOpenGL(predictNet, useTextureInput);
+    *glPredictNet = rewritePredictNetForOpenGL(predictNet, useTextureInput, useTiling, runFusion);
     dumpDefForOpenGL(*glPredictNet);
     // Throws if unsupported parameters are found.
     Workspace ws;
