@@ -9,10 +9,7 @@
 #include "caffe2/core/operator.h"
 #include "caffe2/operators/conv_pool_op_base.h"
 #include "caffe2/operators/leaky_relu_op.h"
-<<<<<<< HEAD
 #include "caffe2/utils/cpuid.h"
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 #include "caffe2/utils/math.h"
 #include "nnpack.h"
 
@@ -119,7 +116,6 @@ class NNPACKConvOp final : public ConvPoolOpBase<CPUContext> {
 
     const int N = X.dim32(0), C = X.dim32(1), H = X.dim32(2), W = X.dim32(3);
     const int M = filter.dim32(0);
-<<<<<<< HEAD
 
     CAFFE_ENFORCE(X.ndim() == 4, "Input dim should be 4");
     CAFFE_ENFORCE(filter.ndim(), 4);
@@ -130,18 +126,6 @@ class NNPACKConvOp final : public ConvPoolOpBase<CPUContext> {
     CAFFE_ENFORCE(filter.dim32(3) == this->kernel_w(), "");
     CAFFE_ENFORCE(bias.size() == M, "");
 
-=======
-
-    CAFFE_ENFORCE(X.ndim() == 4, "Input dim should be 4");
-    CAFFE_ENFORCE(filter.ndim(), 4);
-    CAFFE_ENFORCE(C % this->group_ == 0, "");
-    CAFFE_ENFORCE(M % this->group_ == 0, "");
-    CAFFE_ENFORCE(filter.dim32(1) == C / this->group_, "");
-    CAFFE_ENFORCE(filter.dim32(2) == this->kernel_h(), "");
-    CAFFE_ENFORCE(filter.dim32(3) == this->kernel_w(), "");
-    CAFFE_ENFORCE(bias.size() == M, "");
-
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     ConvPoolOpBase<CPUContext>::SetOutputSize(X, Y, filter.dim32(0));
     const int oH = Y->dim32(2), oW = Y->dim32(3);
 
@@ -305,12 +289,7 @@ class NNPACKReluOp final : public Operator<CPUContext> {
 #ifdef CAFFE2_USE_FBCODE
     // Facebook's nnpack build assumes existence of avx2, so we explicitly
     // check if the machine has avx2 support.
-<<<<<<< HEAD
     OPERATOR_NEEDS_FEATURE(GetCpuId().avx2(), "NNPack requires AVX2");
-=======
-    OPERATOR_NEEDS_FEATURE(
-        __builtin_cpu_supports("avx2"), "NNPack requires AVX2");
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 #endif
   }
 
@@ -338,12 +317,7 @@ class NNPACKLeakyReluOp final : public LeakyReluOp<float, CPUContext> {
 #ifdef CAFFE2_USE_FBCODE
     // Facebook's nnpack build assumes existence of avx2, so we explicitly
     // check if the machine has avx2 support.
-<<<<<<< HEAD
     OPERATOR_NEEDS_FEATURE(GetCpuId().avx2(), "NNPack requires AVX2");
-=======
-    OPERATOR_NEEDS_FEATURE(
-        __builtin_cpu_supports("avx2"), "NNPack requires AVX2");
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 #endif
   }
 

@@ -6,19 +6,24 @@
 #include "caffe2/core/logging.h"
 
 CAFFE2_DECLARE_bool(caffe2_report_cpu_memory_usage);
+CAFFE2_DECLARE_bool(caffe2_cpu_allocator_do_zero_fill);
 
 namespace caffe2 {
 
 // Use 32-byte alignment should be enough for computation up to AVX512.
 constexpr size_t gCaffe2Alignment = 32;
 
-using MemoryDeleter = std::function<void(void* ptr)>;
+using MemoryDeleter = void (*)(void*);
+
+// A helper function that is basically doing nothing.
+void NoDelete(void*);
 
 // A virtual allocator class to do memory allocation and deallocation.
 struct CPUAllocator {
   CPUAllocator() {}
   virtual ~CPUAllocator() noexcept {}
   virtual std::pair<void*, MemoryDeleter> New(size_t nbytes) = 0;
+  virtual MemoryDeleter GetDeleter() = 0;
 };
 
 // A virtual struct that is used to report Caffe2's memory allocation and
@@ -48,9 +53,12 @@ struct DefaultCPUAllocator final : CPUAllocator {
     CAFFE_ENFORCE_EQ(posix_memalign(&data, gCaffe2Alignment, nbytes), 0);
 #endif
     CAFFE_ENFORCE(data);
-    memset(data, 0, nbytes);
+    if (FLAGS_caffe2_cpu_allocator_do_zero_fill) {
+      memset(data, 0, nbytes);
+    }
     return {data, Delete};
   }
+
 #ifdef _MSC_VER
   static void Delete(void* data) {
     _aligned_free(data);
@@ -60,6 +68,10 @@ struct DefaultCPUAllocator final : CPUAllocator {
     free(data);
   }
 #endif
+
+  MemoryDeleter GetDeleter() override {
+    return Delete;
+  }
 };
 
 // Get the CPU Alloctor.

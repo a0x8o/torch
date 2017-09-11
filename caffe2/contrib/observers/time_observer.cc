@@ -5,14 +5,8 @@ namespace caffe2 {
 
 template <>
 bool TimeObserver<NetBase>::Start() {
-<<<<<<< HEAD
   for (auto* op : subject_->GetOperators()) {
     op->SetObserver(caffe2::make_unique<TimeObserver<OperatorBase>>(op));
-=======
-  vector<OperatorBase*> operators = subject_->getOperators();
-  for (auto& op : operators) {
-    children_.push_back(caffe2::make_unique<TimeObserver<OperatorBase>>(op));
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   }
   start_time_ = timer_.MilliSeconds();
   ++iterations_;

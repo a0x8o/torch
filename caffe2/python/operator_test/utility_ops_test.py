@@ -263,7 +263,6 @@ class TestUtilityOps(hu.HypothesisTestCase):
             workspace.RunOperatorOnce(op)
             Y = workspace.FetchBlob('Y')
             np.testing.assert_array_equal(X, Y)
-<<<<<<< HEAD
 
     @given(**hu.gcs)
     def test_range(self, gc, dc):
@@ -312,5 +311,3 @@ class TestUtilityOps(hu.HypothesisTestCase):
                 inputs=inputs,
                 reference=lambda *x: [np.arange(*x)],
             )
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3

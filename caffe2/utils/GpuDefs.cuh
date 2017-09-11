@@ -8,11 +8,7 @@ namespace caffe2 {
 // Static definition of GPU warp size for unrolling and code generation
 
 #ifdef __CUDA_ARCH__
-<<<<<<< HEAD
 #if __CUDA_ARCH__ <= 700
-=======
-#if __CUDA_ARCH__ <= 620
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 constexpr int kWarpSize = 32;
 #else
 #error Unknown __CUDA_ARCH__; please define parameters for compute capability

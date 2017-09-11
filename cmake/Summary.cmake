@@ -28,16 +28,11 @@ function (Caffe2_print_configuration_summary)
 
   message(STATUS "  BUILD_BINARY          : ${BUILD_BINARY}")
   message(STATUS "  BUILD_PYTHON          : ${BUILD_PYTHON}")
-<<<<<<< HEAD
   if (${BUILD_PYTHON})
     message(STATUS "    Python version      : ${PYTHONLIBS_VERSION_STRING}")
     message(STATUS "    Python library      : ${PYTHON_LIBRARIES}")
   endif()
   message(STATUS "  BUILD_SHARED_LIBS     : ${BUILD_SHARED_LIBS}")
-=======
-  message(STATUS "    Python version      : ${PYTHONLIBS_VERSION_STRING}")
-  message(STATUS "    Python library      : ${PYTHON_LIBRARIES}")
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   message(STATUS "  BUILD_TEST            : ${BUILD_TEST}")
 
   message(STATUS "  USE_CUDA              : ${USE_CUDA}")

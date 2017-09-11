@@ -27,15 +27,9 @@ class DummyObserver final : public ObserverBase<T> {
 
 template <>
 bool DummyObserver<NetBase>::Start() {
-<<<<<<< HEAD
   vector<OperatorBase*> operators = subject_->GetOperators();
   for (auto& op : operators) {
     op->SetObserver(caffe2::make_unique<DummyObserver<OperatorBase>>(op));
-=======
-  vector<OperatorBase*> operators = subject_->getOperators();
-  for (auto& op : operators) {
-    ops_obs.push_back(caffe2::make_unique<DummyObserver<OperatorBase>>(op));
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   }
   counter.fetch_add(1000);
   return true;
@@ -79,7 +73,6 @@ OPERATOR_SCHEMA(ObsTestDummy)
     .NumOutputs(0, INT_MAX)
     .AllowInplace({{0, 0}, {1, 1}});
 
-<<<<<<< HEAD
 unique_ptr<NetBase> CreateNetTestHelper(Workspace* ws, bool isDAG = false) {
   NetDef net_def;
   if (isDAG) {
@@ -90,45 +83,6 @@ unique_ptr<NetBase> CreateNetTestHelper(Workspace* ws, bool isDAG = false) {
     op.set_type("ObsTestDummy");
     op.add_input("in");
     op.add_output("hidden");
-=======
-const std::basic_string<char> kExampleNetDefString = {
-    "  name: \"example\""
-    "  op {"
-    "    input: \"in\""
-    "    output: \"hidden\""
-    "    type: \"ObsTestDummy\""
-    "  }"
-    "  op {"
-    "    input: \"hidden\""
-    "    output: \"out\""
-    "    type: \"ObsTestDummy\""
-    "  }"};
-
-const std::basic_string<char> kExampleDAGNetDefString = {
-    "  name: \"example\""
-    "  type: \"dag\""
-    "  op {"
-    "    input: \"in\""
-    "    output: \"hidden\""
-    "    type: \"ObsTestDummy\""
-    "  }"
-    "  op {"
-    "    input: \"hidden\""
-    "    output: \"out\""
-    "    type: \"ObsTestDummy\""
-    "  }"};
-
-unique_ptr<NetBase> CreateNetTestHelper(
-    Workspace* ws,
-    const vector<string>& input,
-    const vector<string>& output,
-    const std::basic_string<char>& net_def_string) {
-  NetDef net_def;
-  CAFFE_ENFORCE(
-      google::protobuf::TextFormat::ParseFromString(net_def_string, &net_def));
-  for (const auto& name : input) {
-    net_def.add_external_input(name);
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   }
   {
     auto& op = *(net_def.add_op());
@@ -148,19 +102,11 @@ TEST(ObserverTest, TestNotify) {
   Workspace ws;
   ws.CreateBlob("in");
   NetDef net_def;
-<<<<<<< HEAD
   unique_ptr<NetBase> net(CreateNetTestHelper(&ws));
   EXPECT_EQ(caffe2::dynamic_cast_if_rtti<SimpleNet*>(net.get()), net.get());
   unique_ptr<DummyObserver<NetBase>> net_ob =
       make_unique<DummyObserver<NetBase>>(net.get());
   net.get()->SetObserver(std::move(net_ob));
-=======
-  unique_ptr<NetBase> net(
-      CreateNetTestHelper(&ws, {"in"}, {"out"}, kExampleNetDefString));
-  EXPECT_EQ(caffe2::dynamic_cast_if_rtti<SimpleNet*>(net.get()), net.get());
-  unique_ptr<DummyObserver<NetBase>> net_ob =
-      make_unique<DummyObserver<NetBase>>(net.get());
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   net.get()->Run();
   auto count_after = counter.load();
   EXPECT_EQ(1212, count_after - count_before);
@@ -171,17 +117,10 @@ TEST(ObserverTest, TestNotifyAfterDetach) {
   Workspace ws;
   ws.CreateBlob("in");
   NetDef net_def;
-<<<<<<< HEAD
   unique_ptr<NetBase> net(CreateNetTestHelper(&ws));
   unique_ptr<DummyObserver<NetBase>> net_ob =
       make_unique<DummyObserver<NetBase>>(net.get());
   net.get()->SetObserver(std::move(net_ob));
-=======
-  unique_ptr<NetBase> net(
-      CreateNetTestHelper(&ws, {"in"}, {"out"}, kExampleNetDefString));
-  unique_ptr<DummyObserver<NetBase>> net_ob =
-      make_unique<DummyObserver<NetBase>>(net.get());
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   net.get()->RemoveObserver();
   net.get()->Run();
   auto count_after = counter.load();
@@ -193,19 +132,11 @@ TEST(ObserverTest, TestDAGNetBase) {
   Workspace ws;
   ws.CreateBlob("in");
   NetDef net_def;
-<<<<<<< HEAD
   unique_ptr<NetBase> net(CreateNetTestHelper(&ws, true));
   EXPECT_EQ(caffe2::dynamic_cast_if_rtti<DAGNetBase*>(net.get()), net.get());
   unique_ptr<DummyObserver<NetBase>> net_ob =
       make_unique<DummyObserver<NetBase>>(net.get());
   net.get()->SetObserver(std::move(net_ob));
-=======
-  unique_ptr<NetBase> net(
-      CreateNetTestHelper(&ws, {"in"}, {"out"}, kExampleDAGNetDefString));
-  EXPECT_EQ(caffe2::dynamic_cast_if_rtti<DAGNetBase*>(net.get()), net.get());
-  unique_ptr<DummyObserver<NetBase>> net_ob =
-      make_unique<DummyObserver<NetBase>>(net.get());
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   net.get()->Run();
   auto count_after = counter.load();
   EXPECT_EQ(1212, count_after - count_before);

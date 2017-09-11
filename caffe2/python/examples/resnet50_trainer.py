@@ -228,7 +228,28 @@ def Train(args):
 
     num_shards = args.num_shards
     shard_id = args.shard_id
-    if num_shards > 1:
+
+    # Expect interfaces to be comma separated.
+    # Use of multiple network interfaces is not yet complete,
+    # so simply use the first one in the list.
+    interfaces = args.distributed_interfaces.split(",")
+
+    # Rendezvous using MPI when run with mpirun
+    if os.getenv("OMPI_COMM_WORLD_SIZE") is not None:
+        num_shards = int(os.getenv("OMPI_COMM_WORLD_SIZE", 1))
+        shard_id = int(os.getenv("OMPI_COMM_WORLD_RANK", 0))
+        if num_shards > 1:
+            rendezvous = dict(
+                kv_handler=None,
+                num_shards=num_shards,
+                shard_id=shard_id,
+                engine="GLOO",
+                transport=args.distributed_transport,
+                interface=interfaces[0],
+                mpi_rendezvous=True,
+                exit_nets=None)
+
+    elif num_shards > 1:
         # Create rendezvous for distributed computation
         store_handler = "store_handler"
         if args.redis_host is not None:
@@ -250,12 +271,16 @@ def Train(args):
                     prefix=args.run_id,
                 )
             )
+
         rendezvous = dict(
             kv_handler=store_handler,
             shard_id=shard_id,
             num_shards=num_shards,
             engine="GLOO",
+            transport=args.distributed_transport,
+            interface=interfaces[0],
             exit_nets=None)
+
     else:
         rendezvous = None
 
@@ -485,14 +510,15 @@ def main():
                         help="Load previously saved model to continue training")
     parser.add_argument("--use_cpu", type=bool, default=False,
                         help="Use CPU instead of GPU")
-<<<<<<< HEAD
     parser.add_argument('--dtype', default='float',
                         choices=['float', 'float16'],
                         help='Data type used for training')
     parser.add_argument('--enable-tensor-core', action='store_true',
                         help='Enable Tensor Core math for Conv and FC ops')
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
+    parser.add_argument("--distributed_transport", type=str, default="tcp",
+                        help="Transport to use for distributed run [tcp|ibverbs]")
+    parser.add_argument("--distributed_interfaces", type=str, default="",
+                        help="Network interfaces to use for distributed run")
 
     args = parser.parse_args()
 

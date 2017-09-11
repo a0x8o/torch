@@ -129,7 +129,7 @@ def recurrent_net(
         x[1] for x in initial_cell_inputs] + references
     all_outputs = []
 
-    cell_net.Proto().type = 'rnn'
+    cell_net.Proto().type = 'simple'
 
     # Internal arguments used by RecurrentNetwork operator
 
@@ -179,7 +179,8 @@ def recurrent_net(
                 backward_links.append(
                     (backward_mapping[cell_input], states_grad, 0))
             else:
-                backward_links.append((cell_input + "_grad", states_grad, 0))
+                backward_links.append((recurrent_input_grad, states_grad, 0))
+
 
     for input_t, input_blob in inputs:
         forward_links.append((str(input_t), str(input_blob), 0))
@@ -235,6 +236,10 @@ def recurrent_net(
                         [output_blob],
                     )
 
+    def map_to_dual_list(m):
+        return [str(x) for x in list(m.keys())] + \
+               [str(x) for x in list(m.values())]
+
     backward_args = {}
     if backward_cell_net is not None:
         backward_mapping_keys = set(viewkeys(backward_mapping))
@@ -274,6 +279,7 @@ def recurrent_net(
         link_internal=[str(l) for l in link_internal],
         link_external=[str(l) for l in link_external],
         link_offset=link_offset,
+        enable_rnn_executor=1,
         step_net=str(cell_net.Proto()),
         timestep="timestep" if timestep is None else str(timestep),
         **backward_args
@@ -285,6 +291,22 @@ def recurrent_net(
     # The last output is a list of step workspaces,
     # which is only needed internally for gradient propogation
     return results[:-1]
+
+
+def set_rnn_executor_config(rnn_op, num_threads=None, max_cuda_streams=None):
+    from caffe2.proto import caffe2_pb2
+    assert rnn_op.type in {'RecurrentNetwork', 'RecurrentNetworkGradient'}
+
+    def add_arg(s, v):
+        a = caffe2_pb2.Argument()
+        a.name = "rnn_executor." + s
+        a.i = v
+        rnn_op.arg.extend([a])
+
+    if num_threads is not None:
+        add_arg('num_threads', num_threads)
+    if max_cuda_streams is not None:
+        add_arg('max_cuda_streams', max_cuda_streams)
 
 
 def retrieve_step_blobs(net, prefix='rnn'):

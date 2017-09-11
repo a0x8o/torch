@@ -21,6 +21,8 @@ dyndep.InitOpsLibrary("@/caffe2/caffe2/contrib/gloo:gloo_ops_gpu")
 log = logging.getLogger("data_parallel_model")
 log.setLevel(logging.INFO)
 
+_DEFAULT_TIMEOUT_SEC = 30
+
 
 def Parallelize_GPU(*args, **kwargs):
     kwargs['cpu_device'] = False
@@ -45,14 +47,9 @@ def Parallelize(
     broadcast_computed_params=True,
     optimize_gradient_memory=False,
     use_nccl=False,
-<<<<<<< HEAD
     max_concurrent_distributed_ops=16,
     cpu_device=False,
     num_threads_per_device=4,
-=======
-    max_concurrent_distributed_ops=4,
-    cpu_device=False,
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 ):
     '''
     Function to create a model that can run on many GPUs or CPUs.
@@ -323,15 +320,10 @@ def Parallelize_GPU_BMUF(
     net_type='dag',
     master_gpu=None,
     use_nccl=False,
-<<<<<<< HEAD
     nesterov=False,
     optimize_gradient_memory=False,
     reset_momentum_sgd=False,
     warmup_iterations=None,
-=======
-    optimize_gradient_memory=False,
-    reset_momentum_sgd=False,
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     max_concurrent_distributed_ops=4,
 ):
     '''
@@ -351,10 +343,7 @@ def Parallelize_GPU_BMUF(
         master_gpu = devices[0]
 
     model_helper_obj._devices = devices
-<<<<<<< HEAD
     model_helper_obj._rendezvous = rendezvous
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     model_helper_obj._device_type = caffe2_pb2.CUDA
     model_helper_obj._device_prefix = 'gpu'
     master_gpu_opt = core.DeviceOption(caffe2_pb2.CUDA, master_gpu)
@@ -470,10 +459,6 @@ def Parallelize_GPU_BMUF(
 
     # (Step-2) Comute post-local-updates average of the params.
     # Sum model params across GPUs and store resutls in param_avg blob.
-<<<<<<< HEAD
-=======
-    model_parameter_names = model_helper_obj._device_grouped_blobs.keys()
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     _AllReduceBlobs(
         model_parameter_names,
         devices,
@@ -532,7 +517,6 @@ def Parallelize_GPU_BMUF(
                 _g(param), param
             )
 
-<<<<<<< HEAD
 
     _SyncAllParams(
         devices,
@@ -543,25 +527,6 @@ def Parallelize_GPU_BMUF(
         model_parameter_names,
         max_concurrent_distributed_ops
     )
-=======
-    if rendezvous is not None and rendezvous['num_shards'] > 1:
-        _AddDistributedParameterSync(
-            devices,
-            model_helper_obj,
-            model_helper_obj.param_init_net,
-            model_helper_obj._global_model_param_updates_net,
-            rendezvous,
-            model_parameter_names
-        )
-
-    _SyncParams(
-        devices,
-        model_helper_obj,
-        model_helper_obj._global_model_param_updates_net,
-        model_parameter_names
-    )
-
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
     # Reset momentum-SGD parameters
     if reset_momentum_sgd:
@@ -613,7 +578,10 @@ def RunNet(model, num_iterations):
             workspace.RunNet(net_iter, num_iterations)
 
 
-def Synchronize(model, timeout_sec=30):
+barrier_instance = 0
+
+
+def Synchronize(model, timeout_sec=_DEFAULT_TIMEOUT_SEC):
     log.info("Creating synchronization barrier net")
     assert model._rendezvous is not None, "Missing rendezvous"
     assert model._rendezvous['engine'] == 'GLOO', "Engine does not support barrier"
@@ -623,16 +591,12 @@ def Synchronize(model, timeout_sec=30):
     instance = barrier_instance
     barrier_instance += 1
     barrier_net = core.Net("sync_barrier_net_" + str(instance))
-    comm_world = barrier_net.CreateCommonWorld(
-        [model._rendezvous['kv_handler']] +
-        _GetCommonWorldToFork(model.param_init_net),
+    comm_world = _CreateOrCloneCommonWorld(
+        barrier_net,
         "sync_barrier_cw_" + str(instance),
-        name="sync_barrier_cw_op_" + str(instance),
-        size=model._rendezvous['num_shards'],
-        rank=model._rendezvous['shard_id'],
-        engine=model._rendezvous['engine'],
+        rendezvous=model._rendezvous,
         status_blob="sync_barrier_cw_status_" + str(instance),
-        timeout_ms=timeout_sec * 1000
+        timeout_sec=timeout_sec,
     )
     barrier_net.Barrier(
         inputs=[comm_world],
@@ -840,7 +804,6 @@ def _Broadcast(devices, model, net, param, use_nccl=False):
         if _IsGPUBlob(model, param):
             master_device_opt = core.DeviceOption(model._device_type, master_dev)
             with core.DeviceScope(master_device_opt):
-<<<<<<< HEAD
                 # Note that the root is the root _rank_ and not the root
                 # _device_. Thus we always use root=0, regardless of the
                 # devices used.
@@ -848,12 +811,6 @@ def _Broadcast(devices, model, net, param, use_nccl=False):
                     model._device_grouped_blobs[param].values(),
                     model._device_grouped_blobs[param].values(),
                     root=0,
-=======
-                model.NCCLBroadcast(
-                    model._device_grouped_blobs[param].values(),
-                    model._device_grouped_blobs[param].values(),
-                    root=master_dev
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
                 )
                 return
 
@@ -870,11 +827,7 @@ def _Broadcast(devices, model, net, param, use_nccl=False):
 
 
 def _AllReduce(devices, model, net, param, use_nccl=False, control_input=None):
-<<<<<<< HEAD
     blobs_group = list(viewvalues(model._device_grouped_blobs[param]))
-=======
-    blobs_group = model._device_grouped_blobs[param].values()
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     if model._device_type == caffe2_pb2.CUDA and use_nccl:
         model.NCCLAllreduce(
             blobs_group, blobs_group, control_input=control_input
@@ -911,8 +864,16 @@ def _AllReduce(devices, model, net, param, use_nccl=False, control_input=None):
         with core.DeviceScope(device_opt):
             net.Sum(blobs, [blobs[0]], name='dpm')
 
-    if len(devices) == 8:
-        # Special tree reduction for 8 gpus, TODO generalize like in muji.py
+    if len(devices) == 16:
+        # Special tree reduction for 16 gpus, TODO generalize like in muji.py
+        for j in range(8):
+            sumN(j * 2, j * 2 + 1)
+        for j in range(4):
+            sumN(j * 4, j * 4 + 2)
+        for j in range(2):
+            sumN(j * 8, j * 8 + 4)
+        sumN(0, 8)
+    elif len(devices) == 8:
         for j in range(4):
             sumN(j * 2, j * 2 + 1)
         for j in range(2):
@@ -1035,7 +996,6 @@ def _AllReduceBlobs(blob_names, devices, model, net, rendezvous, use_nccl,
         )
 
 
-<<<<<<< HEAD
 class CollectivesConcurrencyControl(object):
     """
     Creates common worlds (up to max_concurrent_context) and manage the
@@ -1061,18 +1021,14 @@ class CollectivesConcurrencyControl(object):
         common_world, control_input = [None, None]
         current_slot = self.counter % self.max_concurrent_context
         if len(self.common_worlds) < self.max_concurrent_context:
-            common_world = self.param_init_net.CreateCommonWorld(
-                [self.rendezvous['kv_handler']] +
-                _GetCommonWorldToFork(self.param_init_net),
+            common_world = _CreateOrCloneCommonWorld(
+                self.param_init_net,
                 "{}_{}_cw".format(self.name, current_slot),
-                name="{}_{}_cw_op".format(self.name, current_slot),
-                size=self.rendezvous['num_shards'],
-                rank=self.rendezvous['shard_id'],
-                engine=self.rendezvous['engine'],
+                rendezvous=self.rendezvous,
                 status_blob="create_{}_cw_{}_status".format(
                     self.name,
                     current_slot
-                )
+                ),
             )
             self.common_worlds.append(common_world)
             self.control_inputs.append(control_output_blob)
@@ -1084,8 +1040,6 @@ class CollectivesConcurrencyControl(object):
         return common_world, control_input
 
 
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 def _AllReduceBlobsDistributed(
     blob_names,
     devices,
@@ -1098,11 +1052,7 @@ def _AllReduceBlobsDistributed(
     assert num_workers > 1, "Please specify more than 1 worker"
     all_reduce_engine = rendezvous['engine']
 
-<<<<<<< HEAD
     master_device_opt = core.DeviceOption(model._device_type, devices[0])
-=======
-    master_device_opt = core.DeviceOption(caffe2_pb2.CUDA, devices[0])
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
     reducing_device_opt = master_device_opt
 
@@ -1115,50 +1065,20 @@ def _AllReduceBlobsDistributed(
 
     nccl_control_blob = None
 
-<<<<<<< HEAD
     for blob_name in blob_names:
         master_blob = model._device_grouped_blobs[blob_name][devices[0]]
         blobs_group = list(viewvalues(model._device_grouped_blobs[blob_name]))
-=======
-    # Note: sorted order to ensure each host puts the operators in
-    # same order.
-    for blob_name in blob_names:
-        master_blob = model._device_grouped_blobs[blob_name][devices[0]]
-        blobs_group = model._device_grouped_blobs[blob_name].values()
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
         assert master_blob in blobs_group
 
         # Remark: NCCLReduce does not support in-place modifications
         # so we need a temporary blob
         reduced_blob = str(master_blob) + "_red"
-<<<<<<< HEAD
 
         def allreduce(blobs):
             with core.DeviceScope(reducing_device_opt):
                 comm_world, control_input = \
                     context.get_control_and_context(blobs[0])
-=======
-
-        control_input = None if len(cyclical_controls) < num_controls \
-                        else cyclical_controls[counter % num_controls]
-        comm_world = None if len(cyclical_comm_worlds) < num_comm_worlds \
-                     else cyclical_comm_worlds[counter % num_comm_worlds]
-
-        def allreduce(comm_world, blobs):
-            with core.DeviceScope(reducing_device_opt):
-                if comm_world is None:
-                    comm_number = len(cyclical_comm_worlds)
-                    comm_world = model.param_init_net.CreateCommonWorld(
-                        rendezvous['kv_handler'],
-                        "allreduce_{}_cw".format(comm_number),
-                        name="allreduce_{}_cw_op".format(comm_number),
-                        size=rendezvous['num_shards'],
-                        rank=rendezvous['shard_id'],
-                        engine=rendezvous['engine'],
-                        status_blob="create_cw_{}_status".format(comm_number),
-                    )
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
                 net.Allreduce(
                     inputs=[comm_world] + blobs,
                     outputs=blobs,
@@ -1171,12 +1091,7 @@ def _AllReduceBlobsDistributed(
         if rendezvous['engine'] == 'GLOO':
             # With Gloo cross GPU and cross machine allreduce
             # can be executed in a single operation
-<<<<<<< HEAD
             allreduce(blobs_group)
-=======
-            comm_world = allreduce(comm_world, blobs_group)
-            control_output = blobs_group[0]
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
         else:
             # Step 1: sum blobs from local GPUs to master GPU
             with core.DeviceScope(master_device_opt):
@@ -1192,37 +1107,15 @@ def _AllReduceBlobsDistributed(
                 net.Copy(master_blob, reduced_blob)
 
             # Step 2: allreduce between all hosts, between master GPUs
-<<<<<<< HEAD
             allreduce([reduced_blob])
-=======
-            comm_world = allreduce(comm_world, [reduced_blob])
-            control_output = reduced_blob
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
             with core.DeviceScope(master_device_opt):
                 net.Copy(reduced_blob, master_blob)
 
             # Step 3: broadcast locally
             _Broadcast(devices, model, net, blob_name)
-<<<<<<< HEAD
-=======
-
-        if len(cyclical_controls) < num_controls:
-            cyclical_controls.append(control_output)
-        else:
-            cyclical_controls[counter % num_controls] = control_output
-
-        if len(cyclical_comm_worlds) < num_comm_worlds:
-            cyclical_comm_worlds.append(comm_world)
-        else:
-            assert cyclical_comm_worlds[counter % num_comm_worlds] == comm_world
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 def _AllReduceBlobsSingleHost(blob_names, devices, model, net, use_nccl):
     """Performs NCCL AllReduce to distribute blobs to all the GPUs."""
 
@@ -1237,11 +1130,7 @@ def _AllReduceBlobsSingleHost(blob_names, devices, model, net, use_nccl):
 
     for blob_name in blob_names:
         # Group by blob_name for reduce.
-<<<<<<< HEAD
         blobs_group = list(viewvalues(model._device_grouped_blobs[blob_name]))
-=======
-        blobs_group = model._device_grouped_blobs[blob_name].values()
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
         assert len(blobs_group) == len(devices), \
             "Each GPU from {}, should have a copy of {}.".format(
                 devices, blob_name)
@@ -1277,11 +1166,7 @@ def _AllReduceBlobsSingleHost(blob_names, devices, model, net, use_nccl):
                             axis=0,
                             name="note:data_parallel_model")
 
-<<<<<<< HEAD
                         for gpu, g in viewitems(model._device_grouped_blobs[blob_name]):
-=======
-                        for gpu, g in model._device_grouped_blobs[blob_name].items():
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
                             device_opt = core.DeviceOption(model._device_type, gpu)
                             with core.DeviceScope(device_opt):
                                 model.Copy(grad_idx_concat, g.indices)
@@ -1293,11 +1178,7 @@ def _AllReduceBlobsSingleHost(blob_names, devices, model, net, use_nccl):
                          "{}/{}_val_splitinfo".format(master_ns, blob_name)],
                         axis=0, name="note:data_parallel_model")
 
-<<<<<<< HEAD
                     for gpu, g in viewitems(model._device_grouped_blobs[blob_name]):
-=======
-                    for gpu, g in model._device_grouped_blobs[blob_name].items():
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
                         device_opt = core.DeviceOption(model._device_type, gpu)
                         with core.DeviceScope(device_opt):
                             model.Copy(grad_val_concat, g.values)
@@ -1516,7 +1397,16 @@ def _ComputeBlobsToSync(model):
        "Some params not instantiated in param init net: {}".format(diff)
 
     # Remove duplicates and sort
-    blobs_to_sync = sorted(list(set(blobs_to_sync)))
+    prefixlen = len(model._device_prefix) + 1
+
+    def extract_sort_key(b):
+        # Sort first based on device id, and then by whole string
+        deviceid = int(b[prefixlen:b.index(scope._NAMESCOPE_SEPARATOR)])
+        return (deviceid, b)
+
+    blobs_to_sync = sorted(
+        list(set(blobs_to_sync)),
+        key=extract_sort_key)
 
     blobs_to_sync = [core.BlobReference(b) for b in blobs_to_sync]
     return (blobs_to_sync, sync_names)
@@ -1549,7 +1439,6 @@ def OptimizeGradientMemory(model,
                    that you will access externally.
     recycle_activations: whether to also recycle forward pass activations
     """
-<<<<<<< HEAD
     if input_shapes is not None:
         input_shapes_all_devices = {}
         for b, shp in viewitems(input_shapes):
@@ -1567,22 +1456,6 @@ def OptimizeGradientMemory(model,
     for device in model._devices:
         namescope = "{}_{}/".format(model._device_prefix, device)
         excluded_blobs_by_device = set(namescope + b for b in excluded_blobs)
-=======
-    input_shapes_all_devices = {}
-    for b, shp in input_shapes.items():
-        for d in model._devices:
-            input_shapes_all_devices["{}_{}/{}".
-                                     format(model._device_prefix, d, b)] = shp
-
-    (shapes, types) = workspace.InferShapesAndTypes(
-        [model.param_init_net, model.net],
-        input_shapes_all_devices,
-    )
-
-    for device in model._devices:
-        namescope = "{}_{}/".format(model._device_prefix, device)
-        excluded_blobs_by_device = set([namescope + b for b in excluded_blobs])
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
         model.net._net = memonger.share_grad_blobs(
             model.net,
             model._losses_by_gpu[device],
@@ -1594,18 +1467,70 @@ def OptimizeGradientMemory(model,
         )
 
 
-def _GetCommonWorldToFork(param_init_net):
-    '''
-    We can fork common worlds from existing ones. So inspect the param_init_net
-    for an already created commonworld
-    '''
-    for op in param_init_net.Proto().op:
-        if op.type == "CreateCommonWorld":
-            return [op.output[0]]
-    return []
+def _CreateOrCloneCommonWorld(
+        net,
+        common_world_blob,
+        rendezvous,
+        name=None,
+        status_blob=None,
+        timeout_sec=_DEFAULT_TIMEOUT_SEC):
+    timeout_ms = timeout_sec * 1000
 
+    # Check if there is an existing CreateCommonWorld
+    # with the same timeout we're looking for. If so,
+    # we can clone it instead of creating a new one.
+    existing = None
+    for op in net.Proto().op:
+        if op.type != "CreateCommonWorld":
+            continue
 
-barrier_instance = 0
+        # Find common world timeout
+        op_timeout_ms = -1
+        for arg in op.arg:
+            if arg.name == 'timeout_ms':
+                op_timeout_ms = arg.i
+                break
+        if op_timeout_ms != timeout_ms:
+            continue
+
+        # This common world was created with the same timeout we're
+        # looking for, so we can clone it
+        existing = op.output[0]
+        break
+
+    if name is None:
+        name = "{}_op".format(common_world_blob)
+
+    if existing is not None:
+        comm_world = net.CloneCommonWorld(
+            [existing],
+            common_world_blob,
+            name=name,
+            engine=rendezvous['engine'],
+            status_blob=status_blob,
+        )
+    else:
+        kwargs=dict()
+        if 'transport' in rendezvous:
+            kwargs['transport'] = rendezvous['transport']
+        if 'interface' in rendezvous:
+            kwargs['interface'] = rendezvous['interface']
+        if 'mpi_rendezvous' in rendezvous:
+            kwargs['mpi_rendezvous'] = rendezvous['mpi_rendezvous']
+
+        comm_world = net.CreateCommonWorld(
+            rendezvous['kv_handler'] or [],
+            common_world_blob,
+            name=name,
+            size=rendezvous['num_shards'],
+            rank=rendezvous['shard_id'],
+            engine=rendezvous['engine'],
+            status_blob=status_blob,
+            timeout_ms=timeout_ms,
+            **kwargs
+        )
+
+    return comm_world
 
 
 def _RunComparison(model, blob_name, device=None):
@@ -1622,14 +1547,18 @@ def _RunComparison(model, blob_name, device=None):
 
         comparison_net = core.Net("allcompare_net")
 
+        kwargs=dict()
+        if 'mpi_rendezvous' in rendezvous:
+            kwargs['mpi_rendezvous'] = rendezvous['mpi_rendezvous']
         comm_world = comparison_net.CreateCommonWorld(
-            rendezvous['kv_handler'],
+            rendezvous['kv_handler'] or [],
             "initial_sync",
             name=model.net.Proto().name + ".cw_master_select",
             size=rendezvous['num_shards'],
             rank=rendezvous['shard_id'],
             engine=rendezvous['engine'],
             status_blob="cw_master_select",
+            **kwargs
         )
 
         blob_name_checksum = blob_name + "_checksum"

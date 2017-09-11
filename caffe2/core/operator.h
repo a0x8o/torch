@@ -122,7 +122,7 @@ class OperatorBase {
   // computation on the corresponding context and record the event in its
   // event_ member object. If the specific operator does not support RunAsync,
   // it will simply be synchronous as a fallback.
-  virtual bool RunAsync(int /* unused */ stream_id = 0) {
+  virtual bool RunAsync(int stream_id = 0) {
     return Run(stream_id);
   }
 
@@ -177,7 +177,6 @@ class OperatorBase {
     observer_ = nullptr;
   }
 
-<<<<<<< HEAD
   void RecordLastFailedOpNetPosition() {
     if (net_position_ != kNoNetPositionSet) {
       VLOG(1) << "Operator with id " << net_position_ << " failed";
@@ -203,16 +202,17 @@ class OperatorBase {
     return event_;
   }
 
+  const std::string& type() {
+    CAFFE_ENFORCE(operator_def_.get() != nullptr);
+    return operator_def_->type();
+  }
+
  public:
   static constexpr int kNoNetPositionSet = -1;
 
   ObserverBase<OperatorBase>* GetObserver() {
     return observer_.get();
   }
-=======
- protected:
-  ObserverBase<OperatorBase>* observer_ = nullptr;
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
  private:
   Workspace* operator_ws_;
@@ -299,28 +299,17 @@ class Operator : public OperatorBase {
         observer_->Start();
       }
       context_.SwitchToDevice(stream_id);
-<<<<<<< HEAD
       bool result = RunOnDevice();
       if (!result) {
         this->RecordLastFailedOpNetPosition();
-=======
-      bool started = RunOnDevice();
-      bool finished = context_.FinishDeviceComputation();
-      if (!finished) {
-        // FinishDeviceComputation() returning error basically means that there
-        // is something wrong with the device (like CUDA) that usually cannot be
-        // recovered, so we should log FATAL.
-        LOG(FATAL) << "Computation on device returned error in operator\n"
-                   << ProtoDebugString(this->def());
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
       }
       context_.FinishDeviceComputation(); // throws on error
       if (observer_) {
         observer_->Stop();
       }
-      return (started && finished);
+
+      return result;
     } catch (EnforceNotMet& err) {
-<<<<<<< HEAD
       if (has_debug_def()) {
         err.AppendMessage(
             "Error from operator: \n" + ProtoDebugString(debug_def()));
@@ -330,10 +319,6 @@ class Operator : public OperatorBase {
       throw;
     } catch (...) {
       this->RecordLastFailedOpNetPosition();
-=======
-      err.AppendMessage("Error from operator: \n" + ProtoDebugString(def()));
-      AddRelatedBlobInfo(&err);
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
       throw;
     }
   }
@@ -341,7 +326,6 @@ class Operator : public OperatorBase {
   bool RunAsync(int stream_id = 0) final {
     try {
       context_.SwitchToDevice(stream_id);
-<<<<<<< HEAD
       auto result = RunOnDevice();
       if (!result) {
         this->RecordLastFailedOpNetPosition();
@@ -358,12 +342,6 @@ class Operator : public OperatorBase {
       throw;
     } catch (...) {
       this->RecordLastFailedOpNetPosition();
-=======
-      return RunOnDevice();
-    } catch (EnforceNotMet& err) {
-      err.AppendMessage("Error from operator: \n" + ProtoDebugString(def()));
-      AddRelatedBlobInfo(&err);
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
       throw;
     }
   }

@@ -90,11 +90,8 @@ function(caffe2_select_nvcc_arch_flags out_variable)
     set(__cuda_arch_bin "50")
   elseif(${CUDA_ARCH_NAME} STREQUAL "Pascal")
     set(__cuda_arch_bin "60 61")
-<<<<<<< HEAD
   elseif(${CUDA_ARCH_NAME} STREQUAL "Volta")
     set(__cuda_arch_bin "70")
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   elseif(${CUDA_ARCH_NAME} STREQUAL "All")
     set(__cuda_arch_bin ${Caffe2_known_gpu_archs})
   elseif(${CUDA_ARCH_NAME} STREQUAL "Auto")

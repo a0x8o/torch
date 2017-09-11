@@ -549,15 +549,12 @@ void addObjectMethods(py::module& m) {
             py::gil_scoped_release g;
             CAFFE_ENFORCE(self->RunPlan(proto));
           })
-<<<<<<< HEAD
       .def(
           "_last_failed_op_net_position",
           [](Workspace* self) {
             CAFFE_ENFORCE(self);
             return (int)self->last_failed_op_net_position;
           })
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
       .def_property_readonly_static("current", [](py::object /* type */) {
         auto ws = gWorkspaces.find(gCurrentWorkspaceName);
         CAFFE_ENFORCE(ws != gWorkspaces.end());
@@ -1094,10 +1091,6 @@ void addGlobalMethods(py::module& m) {
         gRegistry()[token] = Func{func, pass_workspace};
         return token;
       });
-<<<<<<< HEAD
-=======
-
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   m.def(
       "register_python_gradient_op",
       [](const std::string& token, py::object func) {

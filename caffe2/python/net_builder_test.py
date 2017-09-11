@@ -245,7 +245,6 @@ class TestNetBuilder(unittest.TestCase):
             self.assertEquals(total1.fetch(), NUM_INSTANCES * NUM_ITERS)
             self.assertEquals(total2.fetch(), NUM_INSTANCES * (NUM_ITERS ** 2))
             self.assertEquals(total3.fetch(), NUM_INSTANCES * (NUM_ITERS ** 2))
-<<<<<<< HEAD
 
     def test_if_net(self):
         with NetBuilder() as nb:
@@ -331,5 +330,3 @@ class TestNetBuilder(unittest.TestCase):
 
         self.assertEqual(x_value, 7)
         self.assertEqual(y_value, 21)
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3

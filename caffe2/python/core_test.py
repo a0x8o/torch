@@ -1,23 +1,18 @@
-<<<<<<< HEAD
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
 from inspect import currentframe, getframeinfo
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 import unittest
 
 import numpy as np
+
 from caffe2.proto import caffe2_pb2
 from caffe2.python import core, workspace, test_util
 from caffe2.python.task import Node, Task
 
-<<<<<<< HEAD
 
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 class TestScopes(test_util.TestCase):
     def testBlobReferenceIsIndependentFromNameScope(self):
         blob_v = core.BlobReference("v")
@@ -255,12 +250,8 @@ class TestAutoNaming(test_util.TestCase):
         net_a = create_net()
         net_b = create_net()
         # created net proto is predicatable.
-<<<<<<< HEAD
         self.assertEqual(net_a.Proto().op,
                          net_b.Proto().op)
-=======
-        self.assertEqual(net_a.Proto().op, net_b.Proto().op)
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
         self.assertEqual(net_a.Proto().op[0].output[0], 'foo/ab')
         self.assertEqual(net_a.Proto().op[1].output[0], 'cd')
 
@@ -388,7 +379,6 @@ class TestExtractPredictorNet(test_util.TestCase):
         )
 
 
-<<<<<<< HEAD
 class TestOperatorTraceback(test_util.TestCase):
     def test_operator_constructor_traceback(self):
         net = core.Net("test")
@@ -473,8 +463,6 @@ class TestCreatePlan(test_util.TestCase):
             self.assertEqual(net_1.Name(), net_2.Name()[:trim_size])
 
 
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 @unittest.skipIf(not workspace.has_gpu_support, 'No GPU support')
 class TestInferDevice(test_util.TestCase):
 
@@ -814,7 +802,6 @@ op {
 }
 external_input: "data"
 """
-<<<<<<< HEAD
 
     def test_blob_inplace(self):
         net = core.Net("test")
@@ -840,8 +827,6 @@ external_input: "data"
             net.Relu('nonsense_input_gpu', 'moment')
         with self.assertRaises(RuntimeError):
             core.InjectCrossDeviceCopies(net)
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 
 if __name__ == '__main__':

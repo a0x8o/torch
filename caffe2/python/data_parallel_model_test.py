@@ -16,7 +16,6 @@ from caffe2.python import core, cnn, data_parallel_model, dyndep, optimizer, \
 from caffe2.python.test_util import TestCase
 
 
-<<<<<<< HEAD
 dyndep.InitOpsLibrary("@/caffe2/caffe2/distributed:file_store_handler_ops")
 
 
@@ -36,10 +35,6 @@ class TemporaryDirectory:
 @unittest.skipIf(os.environ.get("TRAVIS"), "DPMTest has a known issue with Travis.")
 class DataParallelModelTest(TestCase):
 
-=======
-class DataParallelModelTest(TestCase):
-
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
     def run_model(self, devices, gpu):
         '''
         Helper function for test_equiv
@@ -108,7 +103,6 @@ class DataParallelModelTest(TestCase):
 
             workspace.RunNet(model.net.Proto().name)
         return workspace.FetchBlob("{}_0/fc_w".format(model._device_prefix))
-<<<<<<< HEAD
 
     def run_test_locally(self, fn, device_option=None, **kwargs):
         # Queue for assertion errors on subprocesses
@@ -149,8 +143,6 @@ class DataParallelModelTest(TestCase):
                 # was raised, it will be re-raised here.
                 if not queue.empty():
                     raise queue.get()
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
     def test_equiv(self):
         '''
@@ -158,12 +150,8 @@ class DataParallelModelTest(TestCase):
         total batchsize, independent of number of GPUs.
         '''
         for gpu in [True, False]:
-<<<<<<< HEAD
             if gpu and (not workspace.has_gpu_support or
                         workspace.NumCudaDevices() < 2):
-=======
-            if gpu and not workspace.has_gpu_support:
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
                 continue
             result_2gpus = self.run_model([0, 1], gpu=gpu)
             result_1gpus = self.run_model([0], gpu=gpu)
@@ -177,6 +165,10 @@ class DataParallelModelTest(TestCase):
             if not gpu or workspace.NumCudaDevices() >= 8:
                 result_8gpus = self.run_model(list(range(8)), gpu=gpu)
                 self.assertTrue(np.allclose(result_1gpus, result_8gpus))
+
+            if not gpu or workspace.NumCudaDevices() >= 16:
+                result_16gpus = self.run_model(list(range(16)), gpu=gpu)
+                self.assertTrue(np.allclose(result_1gpus, result_16gpus))
 
     def test_checkpoint_params(self):
         def add_input_ops(model):
@@ -1008,3 +1000,8 @@ class SparseDataParallelModelTestWithSharedIndices(TestCase):
 
         if workspace.NumCudaDevices() >= 8:
             self.run_model(V, list(range(8)))
+
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()

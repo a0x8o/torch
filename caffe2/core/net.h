@@ -72,24 +72,16 @@ class NetBase {
    * Returns pointers to objects owned with unique_ptrs.
    * Use with caution.
    */
-<<<<<<< HEAD
   virtual vector<OperatorBase*> GetOperators() const = 0;
 
   void SetObserver(std::unique_ptr<NetObserver> observer) {
     observer_ = std::move(observer);
-=======
-  virtual vector<OperatorBase*> getOperators() const = 0;
-
-  void SetObserver(ObserverBase<NetBase>* observer) {
-    observer_ = observer;
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   }
 
   void RemoveObserver() {
     observer_ = nullptr;
   }
 
-<<<<<<< HEAD
   NetObserver* GetObserver() {
     return observer_.get();
   }
@@ -98,18 +90,12 @@ class NetBase {
     return name_;
   }
 
-=======
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
  protected:
   vector<string> external_input_;
   vector<string> external_output_;
   string name_;
-<<<<<<< HEAD
   std::unique_ptr<NetObserver> observer_;
 
-=======
-  ObserverBase<NetBase>* observer_ = nullptr;
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
   DISABLE_COPY_AND_ASSIGN(NetBase);
 };
 
@@ -135,108 +121,7 @@ unique_ptr<NetBase> CreateNet(
     const std::shared_ptr<const NetDef>& net_def,
     Workspace* ws);
 
-<<<<<<< HEAD
 void SetGlobalNetObserverCreator(NetObserverCreator creator);
-=======
-// This is the very basic structure you need to run a network - all it
-// does is simply to run everything in sequence. If you want more fancy control
-// such as a DAG-like execution, check out other better net implementations.
-class SimpleNet : public NetBase {
- public:
-  SimpleNet(const NetDef& net_def, Workspace* ws);
-  bool Run() override;
-  bool RunAsync() override;
-  vector<float> TEST_Benchmark(
-      const int warmup_runs,
-      const int main_runs,
-      const bool run_individual) override;
-
-  /*
-   * This returns a list of pointers to objects stored in unique_ptrs.
-   * Used by Observers.
-   *
-   * Think carefully before using.
-   */
-  vector<OperatorBase*> getOperators() const override {
-    vector<OperatorBase*> op_list;
-    for (auto& op : operators_) {
-      op_list.push_back(op.get());
-    }
-    return op_list;
-  }
-
- protected:
-  vector<unique_ptr<OperatorBase> > operators_;
-
-  DISABLE_COPY_AND_ASSIGN(SimpleNet);
-};
-
-namespace internal {
-struct OperatorNode {
-  unique_ptr<OperatorBase> operator_;
-  vector<int> children_;
-  vector<int> parents_;
-  std::atomic<int> runtime_parent_count_;
-  bool is_chain_start_ = false;
-};
-
-struct OpGraphNode {
-  vector<int> children_;
-  vector<int> parents_;
-  int visited_inputs = 0;
-  int num_orig_parents;
-};
-}
-
-class DAGNetBase : public NetBase {
- public:
-  using ExecutionChains = std::unordered_map<int, std::vector<int>>;
-  DAGNetBase(const NetDef& net_def, Workspace* ws);
-  ~DAGNetBase() override;
-  bool Run() override;
-  // WorkerFunction() is a function wrapper to allow us to run worker threads.
-  // It checks out one ready-to-run operator from the job queue, runs it,
-  // notifies all its children, and for any children that is ready, enqueues
-  // it to the job queue.
-  void WorkerFunction();
-  vector<float> TEST_Benchmark(
-      const int warmup_runs,
-      const int main_runs,
-      const bool run_individual) override;
-
-  const ExecutionChains& TEST_execution_chains() const {
-    return execution_chains_;
-  }
-
-  vector<OperatorBase*> getOperators() const override {
-    vector<OperatorBase*> op_list;
-    for (auto& op_node : operator_nodes_) {
-      op_list.push_back(op_node.operator_.get());
-    }
-    return op_list;
-  }
-
- protected:
-  virtual bool RunAt(const std::vector<int>& chain) = 0;
-
-  vector<internal::OperatorNode> operator_nodes_;
-  ExecutionChains execution_chains_;
-  vector<int> initial_frontier_;
-  std::unique_ptr<SimpleQueue<int>> job_queue_;
-  std::vector<std::thread> workers_;
-  int num_workers_;
-  int num_workers_first_iteration_;
-  int remaining_ops_;
-
-  bool success_;
-  int iter_;
-  std::mutex remaining_ops_mutex_;
-  std::condition_variable cv_;
-  std::mutex run_in_progress_;
-
-  DISABLE_COPY_AND_ASSIGN(DAGNetBase);
-};
->>>>>>> 3d8433f8b359d59d9f0db8e916b3a049262b55f3
 
 }  // namespace caffe2
 

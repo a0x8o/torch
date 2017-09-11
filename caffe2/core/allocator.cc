@@ -8,7 +8,14 @@ CAFFE2_DEFINE_bool(
     false,
     "If set, print out detailed memory usage");
 
+CAFFE2_DEFINE_bool(
+    caffe2_cpu_allocator_do_zero_fill,
+    true,
+    "If set, do memory zerofilling when allocating on CPU");
+
 namespace caffe2 {
+
+void NoDelete(void*) {}
 
 static std::unique_ptr<CPUAllocator> g_cpu_allocator(new DefaultCPUAllocator());
 CPUAllocator* GetCPUAllocator() {

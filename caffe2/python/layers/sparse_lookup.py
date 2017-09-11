@@ -5,6 +5,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+from caffe2.python.helpers.arg_scope import get_current_scope
 from caffe2.python import schema
 from caffe2.python.layers.layers import (
     get_categorical_limit,
@@ -13,10 +14,17 @@ from caffe2.python.layers.layers import (
     LayerPsParam,
     ModelLayer,
 )
+import collections
 import functools
 import math
 import numpy as np
 import operator
+
+
+def get_sparse_lookup_predictor_version(version):
+    assert version in {'fp32', 'fp16', 'uint8rowwise'},\
+        "Unexpected version of sparse_lookup layer {0}".format(version)
+    return version
 
 
 class SparseLookup(ModelLayer):
@@ -66,14 +74,22 @@ class SparseLookup(ModelLayer):
         else:
             avg_length = None
 
-        self.w = self.create_param(param_name='w',
-                                   shape=self.shape,
-                                   initializer=self.weight_init,
-                                   optimizer=weight_optim,
-                                   ps_param=LayerPsParam(
-                                       sparse_key=sparse_key,
-                                       average_length=avg_length
-                                   ))
+        self.w = self.create_param(
+            param_name='w',
+            shape=self.shape,
+            initializer=self.weight_init,
+            optimizer=weight_optim,
+            ps_param=LayerPsParam(
+                sparse_key=sparse_key,
+                average_length=avg_length))
+
+        self.scale_bias_init = ('ConstantFill', {'value': 0.0})
+
+        self.scale_bias = self.create_param(
+            param_name='scale_bias',
+            shape=[],
+            initializer=self.scale_bias_init,
+            optimizer=model.NoOptim)
 
         self.output_schema = schema.Scalar(
             (np.float32, inner_shape),
@@ -86,50 +102,115 @@ class SparseLookup(ModelLayer):
     def get_fp16_compatible_parameters(self):
         return [self.w]
 
+    def get_8bits_compatible_parameters(self):
+        RowwiseQuantized8BitsWeight =\
+            collections.namedtuple(
+                'RowwiseQuantized8BitsWeight',
+                ['w', 'scale_bias'], verbose=True)
+
+        weight = RowwiseQuantized8BitsWeight(
+            self.w, self.scale_bias)
+        return [weight]
+
+    def _gather_wrapper(self, net, version, in_indices, out):
+        # Gather can work on all kinds of input data types, and output
+        # data with the same type. Convert the output of Gather to float,
+        # because the follow-up Ops expect fp32.
+        if version == 'fp32':
+            return net.Gather([self.w, in_indices], out)
+        elif version == 'fp16':
+            gathered_w = net.Gather([self.w, in_indices], 'gathered_w')
+
+            return net.HalfToFloat(gathered_w, out)
+        elif version == 'uint8rowwise':
+            gathered_w = net.Gather([self.w, in_indices], 'gathered_w')
+            gathered_scale_bias = net.Gather(
+                [self.scale_bias, in_indices],
+                'gathered_scale_bias'
+            )
+
+            return net.Rowwise8BitQuantizedToFloat(
+                [gathered_w, gathered_scale_bias], out)
+        else:
+            raise "Unsupported version of operators in SparseLookup " +\
+                "layer: {0}".format(version)
+
+    def _sparse_lengths_weighted_reducer(
+            self, in_indices, weights, reducer,
+            net, version, grad_on_weights=0):
+        op_input = [
+            self.w,
+            weights,
+            in_indices,
+            self.input_record.lengths()
+        ]
+        layer_name = 'SparseLengths' + reducer
+
+        if version in ['fp32', 'fp16']:
+            # SparseLengths* Ops with engine='fp16' will accept either
+            # fp16 or fp32 embedding matrix and output fp32 pooled embedding
+            net.__getattr__(layer_name)(
+                op_input,
+                self.output_schema.field_blobs(),
+                grad_on_weights=grad_on_weights,
+                engine='fp16',
+            )
+        elif version == 'uint8rowwise':
+            op_input.insert(len(op_input), self.scale_bias)
+            net.__getattr__(layer_name + '8BitsRowwise')(
+                op_input, self.output_schema.field_blobs())
+        else:
+            raise "Unsupported version of operator in SparseLookUp " +\
+                "layer: {0}".format(version)
+
     # deal with sparse features of id_list type
-    def _add_ops_id_list(self, net):
+    def _add_ops_id_list(self, net, version):
         assert self.reducer in self._id_list_supported_reducers, (
             "Unsupported reducer: {} for ID_LIST".format(self.reducer)
         )
         if self.reducer in ['Sum', 'Mean']:
-            net.__getattr__('SparseLengths' + self.reducer)(
-                [
-                    self.w,
-                    self.input_record.items(),
-                    self.input_record.lengths(),
-                ],
-                self.output_schema.field_blobs(),
-                engine='fp16',
-            )
+            op_input = [self.w,
+                        self.input_record.items(),
+                        self.input_record.lengths()]
+
+            layer_name = 'SparseLengths' + self.reducer
+            if version in ['fp32', 'fp16']:
+                # SparseLengths* Ops with engine='fp16' will accept either
+                # fp16 or fp32 embedding matrix and output fp32 pooled embedding
+                net.__getattr__(layer_name)(
+                    op_input,
+                    self.output_schema.field_blobs(),
+                    engine='fp16',
+                )
+            elif version == 'uint8rowwise':
+                op_input.insert(len(op_input), self.scale_bias)
+                net.__getattr__(layer_name + '8BitsRowwise')(
+                    op_input, self.output_schema.field_blobs())
+            else:
+                raise "Unsupported version of operator in SparseLookUp " +\
+                    "layer: {0}".format(version)
+
         elif self.reducer == 'Sqrt':
             sqrt_weight = net.LengthsToWeights(
                 [self.input_record.lengths()],
                 [self.input_record.lengths() + '_sqrt'],
                 power=0.5,
             )
-            net.SparseLengthsWeightedSum(
-                [
-                    self.w,
-                    sqrt_weight,
-                    self.input_record.items(),
-                    self.input_record.lengths(),
-                ],
-                self.output_schema.field_blobs(),
-                engine='fp16',
-            )
+            self._sparse_lengths_weighted_reducer(
+                self.input_record.items(),
+                sqrt_weight,
+                'WeightedSum', net, version)
+
         elif self.reducer == 'None':
             # Gather operator will gather the embedding for each id of
             # each IdList.
-            net.Gather(
-                [
-                    self.w,
-                    self.input_record.items(),
-                ],
-                self.output_schema.field_blobs(),
-                engine='fp16',
-            )
+            self._gather_wrapper(net, version, self.input_record.items(),
+                                 self.output_schema.field_blobs())
+
         else:
-            table_rows = net.Gather([self.w, self.input_record.items()])
+            table_rows = self._gather_wrapper(
+                net, version, self.input_record.items(), 'table_rows')
+
             segment_ids = net.LengthsToSegmentIds(
                 self.input_record.lengths(),
                 self.input_record.lengths() + '_sid'),
@@ -140,64 +221,62 @@ class SparseLookup(ModelLayer):
             )
 
     # deal with sparse features of id_score_list type
-    def _add_ops_id_score_list(self, net):
+    def _add_ops_id_score_list(self, net, version):
         assert self.reducer in self._id_score_list_supported_reducers, (
             "Unsupported reducer: {} for ID_SCORE_LIST".format(self.reducer)
         )
         if self.reducer in ['WeightedSum', 'WeightedMean']:
-            net.__getattr__('SparseLengths' + self.reducer)(
-                [
-                    self.w,
-                    self.input_record.values(),
-                    self.input_record.keys(),
-                    self.input_record.lengths(),
-                ],
-                self.output_schema.field_blobs(),
-                engine='fp16',
-            )
+            self._sparse_lengths_weighted_reducer(
+                self.input_record.keys(),
+                self.input_record.values(),
+                self.reducer, net, version)
+
         elif self.reducer in ['Sum', 'Mean']:
-            net.__getattr__('SparseLengths' + self.reducer)(
-                [
-                    self.w,
-                    self.input_record.keys(),
-                    self.input_record.lengths(),
-                ],
-                self.output_schema.field_blobs(),
-                engine='fp16',
-            )
+            op_input = [self.w,
+                        self.input_record.keys(),
+                        self.input_record.lengths()]
+
+            layer_name = 'SparseLengths' + self.reducer
+
+            if version in ['fp32', 'fp16']:
+                net.__getattr__(layer_name)(
+                    op_input,
+                    self.output_schema.field_blobs(),
+                    engine='fp16',
+                )
+            elif version == 'uint8rowwise':
+                net.__getattr__(layer_name + '8BitsRowwise')(
+                    op_input, self.output_schema.field_blobs())
+            else:
+                raise "Unsupported version of operator in SparseLookUp " +\
+                    "layer: {0}".format(version)
+
         elif self.reducer == 'PositionWeighted':
-            net.SparseLengthsWeightedSum(
-                [
-                    self.w,
-                    self.external_weights,
-                    self.input_record.keys(),
-                    self.input_record.lengths(),
-                ],
-                self.output_schema.field_blobs(),
-                grad_on_weights=1,
-                engine='fp16',
-            )
+            self._sparse_lengths_weighted_reducer(
+                self.input_record.keys(),
+                self.external_weights,
+                'WeightedSum', net, version, grad_on_weights=1)
+
         elif self.reducer == 'None':
             # Gather operator will gather the embedding for each id of
             # each IdList.
-            net.Gather(
-                [
-                    self.w,
-                    self.input_record.keys(),
-                ],
-                self.output_schema.field_blobs(),
-                engine='fp16',
-            )
+            self._gather_wrapper(net, version, self.input_record.keys(),
+                                 self.output_schema.field_blobs())
         else:
             raise "Only Sum, Mean, None are supported for IdScoreList input." +\
                 "Trying to create with {}".format(self.reducer)
 
     def add_ops(self, net):
+        cur_scope = get_current_scope()
+        version = get_sparse_lookup_predictor_version(
+            **cur_scope.get(get_sparse_lookup_predictor_version.__name__,
+                            {'version': 'fp32'}))
+
         if schema.equal_schemas(self.input_record, IdList):
-            self._add_ops_id_list(net)
+            self._add_ops_id_list(net, version=version)
         elif schema.equal_schemas(self.input_record,
                                   IdScoreList,
                                   check_field_types=False):
-            self._add_ops_id_score_list(net)
+            self._add_ops_id_score_list(net, version=version)
         else:
             raise "Unsupported input type {0}".format(self.input_record)
