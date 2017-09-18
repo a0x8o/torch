@@ -115,6 +115,14 @@ static NetDef insertInputOutputCopyOps(const NetDef& def, std::unordered_set<std
           gpu_blobs[input].insert(version);
           cpu_blobs[input].erase(version);
         }
+        // Only the first input should be OpenGL texture
+        // Otherwise, copyToOpenGLOp will be inserted for the weights,
+        // which are outputs of QuantDecode
+        if (currentOp.type().find("OpenGLConv") == 0) {
+          if (j == 0) {
+            break;
+          }
+        }
       }
 
       auto* op = mdef.add_op();
@@ -251,7 +259,10 @@ void dumpDefForOpenGL(const NetDef& d) {
 //  }
 //}
 
-NetDef rewritePredictNetForOpenGL(const NetDef& predictNet, bool useTextureInput, bool useTiling, bool runFusion) {
+NetDef rewritePredictNetForOpenGL(const NetDef& predictNet,
+                                  bool useTextureInput,
+                                  bool useTiling,
+                                  bool runFusion) {
   CAFFE_ENFORCE_GE(predictNet.op_size(), 1);
   NetDef net;
   net.CopyFrom(predictNet);

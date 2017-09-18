@@ -26,14 +26,17 @@ class ImageInputOp final
   // SINGLE_LABEL: single integer label for multi-class classification
   // MULTI_LABEL_SPARSE: sparse active label indices for multi-label classification
   // MULTI_LABEL_DENSE: dense label embedding vector for label embedding regression
+  // MULTI_LABEL_WEIGHTED_SPARSE: sparse active label indices with per-label weights
+  // for multi-label classification
   enum LABEL_TYPE {
     SINGLE_LABEL = 0,
     MULTI_LABEL_SPARSE = 1,
-    MULTI_LABEL_DENSE = 2
+    MULTI_LABEL_DENSE = 2,
+    MULTI_LABEL_WEIGHTED_SPARSE = 3
   };
 
-// INCEPTION_STYLE: Random crop with size 8% - 100% image area and aspect ratio
-// in [3/4, 4/3]. Reference: GoogleNet paper
+  // INCEPTION_STYLE: Random crop with size 8% - 100% image area and aspect
+  // ratio in [3/4, 4/3]. Reference: GoogleNet paper
   enum SCALE_JITTER_TYPE {
     NO_SCALE_JITTER = 0,
     INCEPTION_STYLE = 1
@@ -123,10 +126,17 @@ class ImageInputOp final
 
   // thread pool for parse + decode
   int num_decode_threads_;
+  int additional_inputs_offset_;
+  int additional_inputs_count_;
   std::shared_ptr<TaskThreadPool> thread_pool_;
 
   // Output type for GPU transform path
   TensorProto_DataType output_type_;
+
+  // random minsize
+  vector<int> random_scale_;
+  bool random_scaling_;
+
 
   // Working variables
   std::vector<std::mt19937> randgen_per_thread_;
@@ -143,30 +153,37 @@ ImageInputOp<Context>::ImageInputOp(
       batch_size_(
           OperatorBase::template GetSingleArgument<int>("batch_size", 0)),
       label_type_(static_cast<LABEL_TYPE>(
-        OperatorBase::template GetSingleArgument<int>("label_type", 0))),
+          OperatorBase::template GetSingleArgument<int>("label_type", 0))),
       num_labels_(
           OperatorBase::template GetSingleArgument<int>("num_labels", 0)),
       color_(OperatorBase::template GetSingleArgument<int>("color", 1)),
       color_jitter_(
-        OperatorBase::template GetSingleArgument<int>("color_jitter", 0)),
+          OperatorBase::template GetSingleArgument<int>("color_jitter", 0)),
       img_saturation_(OperatorBase::template GetSingleArgument<float>(
-        "img_saturation", 0.4)),
+          "img_saturation",
+          0.4)),
       img_brightness_(OperatorBase::template GetSingleArgument<float>(
-        "img_brightness", 0.4)),
-      img_contrast_(OperatorBase::template GetSingleArgument<float>(
-        "img_contrast", 0.4)),
+          "img_brightness",
+          0.4)),
+      img_contrast_(
+          OperatorBase::template GetSingleArgument<float>("img_contrast", 0.4)),
       color_lighting_(
-        OperatorBase::template GetSingleArgument<int>("color_lighting", 0)),
+          OperatorBase::template GetSingleArgument<int>("color_lighting", 0)),
       color_lighting_std_(OperatorBase::template GetSingleArgument<float>(
-        "color_lighting_std", 0.1)),
+          "color_lighting_std",
+          0.1)),
       scale_jitter_type_(static_cast<SCALE_JITTER_TYPE>(
-        OperatorBase::template GetSingleArgument<int>("scale_jitter_type", 0))),
+          OperatorBase::template GetSingleArgument<int>(
+              "scale_jitter_type",
+              0))),
       scale_(OperatorBase::template GetSingleArgument<int>("scale", -1)),
       minsize_(OperatorBase::template GetSingleArgument<int>("minsize", -1)),
       warp_(OperatorBase::template GetSingleArgument<int>("warp", 0)),
       crop_(OperatorBase::template GetSingleArgument<int>("crop", -1)),
       mirror_(OperatorBase::template GetSingleArgument<int>("mirror", 0)),
-      is_test_(OperatorBase::template GetSingleArgument<int>("is_test", 0)),
+      is_test_(OperatorBase::template GetSingleArgument<int>(
+          OpSchema::Arg_IsTest,
+          0)),
       use_caffe_datum_(
           OperatorBase::template GetSingleArgument<int>("use_caffe_datum", 0)),
       gpu_transform_(OperatorBase::template GetSingleArgument<int>(
@@ -177,7 +194,16 @@ ImageInputOp<Context>::ImageInputOp(
       thread_pool_(std::make_shared<TaskThreadPool>(num_decode_threads_)),
       // output type only supported with CUDA and use_gpu_transform for now
       output_type_(
-          cast::GetCastDataType(ArgumentHelper(operator_def), "output_type")) {
+          cast::GetCastDataType(ArgumentHelper(operator_def), "output_type")),
+      random_scale_(
+          OperatorBase::template GetRepeatedArgument<int>("random_scale", {-1,-1})) {
+  if ((random_scale_[0] == -1) || (random_scale_[1] == -1)) {
+    random_scaling_ = false;
+  } else {
+    random_scaling_ = true;
+    minsize_ = random_scale_[0];
+  }
+
   mean_ = OperatorBase::template GetRepeatedArgument<float>(
     "mean_per_channel",
     {OperatorBase::template GetSingleArgument<float>("mean", 0.)});
@@ -189,6 +215,7 @@ ImageInputOp<Context>::ImageInputOp(
   vector<int> additional_output_sizes =
       OperatorBase::template GetRepeatedArgument<int>(
           "output_sizes", vector<int>(OutputSize() - 2, 1));
+  additional_inputs_count_ = OutputSize() - 2;
 
   default_arg_.bounding_params = {
     false,
@@ -231,6 +258,11 @@ ImageInputOp<Context>::ImageInputOp(
     CAFFE_ENFORCE_GT(num_labels_, 0,
       "Number of labels must be set for using either sparse label indices or dense label embedding.");
   }
+  if (label_type_ == MULTI_LABEL_WEIGHTED_SPARSE) {
+    additional_inputs_offset_ = 3;
+  } else {
+    additional_inputs_offset_ = 2;
+  }
   CAFFE_ENFORCE((scale_ > 0) != (minsize_ > 0),
                 "Must provide one and only one of scaling or minsize");
   CAFFE_ENFORCE_GT(crop_, 0, "Must provide the cropping value.");
@@ -251,6 +283,11 @@ ImageInputOp<Context>::ImageInputOp(
       additional_output_sizes.size() == OutputSize() - 2,
       "If the output sizes are specified, they must be specified for all "
       "additional outputs");
+
+  CAFFE_ENFORCE(random_scale_.size() == 2,
+      "Must provide [scale_min, scale_max]");
+  CAFFE_ENFORCE_GE(random_scale_[1], random_scale_[0],
+      "random scale must provide a range [min, max]");
 
   if (default_arg_.bounding_params.ymin < 0
       || default_arg_.bounding_params.xmin < 0
@@ -286,17 +323,26 @@ ImageInputOp<Context>::ImageInputOp(
       default_arg_.bounding_params.width
               << ")";
   }
-  if (scale_ > 0) {
+  if (scale_ > 0 && !random_scaling_) {
     LOG(INFO) << "    Scaling image to " << scale_
               << (warp_ ? " with " : " without ") << "warping;";
   } else {
-    // Here, minsize_ > 0
-    LOG(INFO) << "    Ensuring minimum image size of " << minsize_
-              << (warp_ ? " with " : " without ") << "warping;";
+    if (random_scaling_) {
+      // randomly set min_size_ for each image
+      LOG(INFO) << "    Randomly scaling shortest side between "
+                << random_scale_[0] << " and "
+                << random_scale_[1];
+    } else {
+      // Here, minsize_ > 0
+      LOG(INFO) << "    Ensuring minimum image size of " << minsize_
+                << (warp_ ? " with " : " without ") << "warping;";
+    }
   }
   LOG(INFO) << "    " << (is_test_ ? "Central" : "Random")
             << " cropping image to " << crop_
             << (mirror_ ? " with " : " without ") << "random mirroring;";
+  LOG(INFO) << "Label Type: " << label_type_;
+  LOG(INFO) << "Num Labels: " << num_labels_;
 
   auto mit = mean_.begin();
   auto sit = std_.begin();
@@ -439,14 +485,15 @@ bool ImageInputOp<Context>::GetImageAndLabelAndInfoFromDBValue(
     const TensorProto& image_proto = protos.protos(0);
     const TensorProto& label_proto = protos.protos(1);
     vector<TensorProto> additional_output_protos;
-
-    for (int i = 2; i < OutputSize(); ++i) {
+    int start = additional_inputs_offset_;
+    int end = start + additional_inputs_count_;
+    for (int i = start; i < end; ++i) {
       additional_output_protos.push_back(protos.protos(i));
     }
 
-    if (protos.protos_size() == OutputSize() + 1) {
+    if (protos.protos_size() == end + 1) {
       // We have bounding box information
-      const TensorProto& bounding_proto = protos.protos(OutputSize());
+      const TensorProto& bounding_proto = protos.protos(end);
       DCHECK_EQ(bounding_proto.data_type(), TensorProto::INT32);
       DCHECK_EQ(bounding_proto.int32_data_size(), 4);
       info.bounding_params.valid = true;
@@ -498,6 +545,15 @@ bool ImageInputOp<Context>::GetImageAndLabelAndInfoFromDBValue(
         for (int i = 0; i < label_proto.float_data_size(); ++i) {
           label_data[(int)label_proto.float_data(i)] = 1.0;
         }
+      } else if (label_type_ == MULTI_LABEL_WEIGHTED_SPARSE) {
+        const TensorProto& weight_proto = protos.protos(2);
+        float* label_data =
+            prefetched_label_.mutable_data<float>() + item_id * num_labels_;
+        memset(label_data, 0, sizeof(float) * num_labels_);
+        for (int i = 0; i < label_proto.float_data_size(); ++i) {
+          label_data[(int)label_proto.float_data(i)] =
+              weight_proto.float_data(i);
+        }
       } else if (label_type_ == MULTI_LABEL_DENSE) {
         CAFFE_ENFORCE(label_proto.float_data_size() == num_labels_);
         float* label_data = prefetched_label_.mutable_data<float>() +
@@ -519,6 +575,14 @@ bool ImageInputOp<Context>::GetImageAndLabelAndInfoFromDBValue(
         memset(label_data, 0, sizeof(int) * num_labels_);
         for (int i = 0; i < label_proto.int32_data_size(); ++i) {
           label_data[label_proto.int32_data(i)] = 1;
+        }
+      } else if (label_type_ == MULTI_LABEL_WEIGHTED_SPARSE) {
+        const TensorProto& weight_proto = protos.protos(2);
+        float* label_data =
+            prefetched_label_.mutable_data<float>() + item_id * num_labels_;
+        memset(label_data, 0, sizeof(float) * num_labels_);
+        for (int i = 0; i < label_proto.int32_data_size(); ++i) {
+          label_data[label_proto.int32_data(i)] = weight_proto.float_data(i);
         }
       } else if (label_type_ == MULTI_LABEL_DENSE) {
         CAFFE_ENFORCE(label_proto.int32_data_size() == num_labels_);
@@ -617,12 +681,18 @@ bool ImageInputOp<Context>::GetImageAndLabelAndInfoFromDBValue(
       inception_scale_jitter = RandomSizedCropping<Context>(img, crop_, randgen);
       // if a random crop is still not found, do simple random cropping later
     }
-  }
 
   if ((scale_jitter_type_ == NO_SCALE_JITTER) ||
     (scale_jitter_type_ == INCEPTION_STYLE && !inception_scale_jitter)) {
       int scaled_width, scaled_height;
       int scale_to_use = scale_ > 0 ? scale_ : minsize_;
+
+      // set the random minsize
+      if (random_scaling_) {
+        scale_to_use = std::uniform_int_distribution<>(random_scale_[0],
+                                                       random_scale_[1])(*randgen);
+      }
+
       if (warp_) {
         scaled_width = scale_to_use;
         scaled_height = scale_to_use;
@@ -653,6 +723,7 @@ bool ImageInputOp<Context>::GetImageAndLabelAndInfoFromDBValue(
             cv::INTER_AREA);
         *img = scaled_img;
       }
+    }
   }
   // TODO(Yangqing): return false if any error happens.
   return true;
@@ -1032,18 +1103,18 @@ bool ImageInputOp<Context>::Prefetch() {
           LOG(FATAL) << "Unsupported label type.";
         }
 
-        for (int i = 2; i < OutputSize(); ++i) {
-          TensorProto additional_output_proto = protos.protos(i);
+        for (int i = 0; i < additional_inputs_count_; ++i) {
+          int index = additional_inputs_offset_ + i;
+          TensorProto additional_output_proto = protos.protos(index);
 
           if (additional_output_proto.data_type() == TensorProto::FLOAT) {
-            prefetched_additional_outputs_[i - 2]
-                .template mutable_data<float>();
+            prefetched_additional_outputs_[i].template mutable_data<float>();
           } else if (
               additional_output_proto.data_type() == TensorProto::INT32) {
-            prefetched_additional_outputs_[i - 2].template mutable_data<int>();
+            prefetched_additional_outputs_[i].template mutable_data<int>();
           } else if (
               additional_output_proto.data_type() == TensorProto::INT64) {
-            prefetched_additional_outputs_[i - 2].template mutable_data<int64_t>();
+            prefetched_additional_outputs_[i].template mutable_data<int64_t>();
           } else {
             LOG(FATAL) << "Unsupported output type.";
           }

@@ -433,7 +433,7 @@ class IR(object):
         for op in operators:
             if op.type == 'StopGradient':
                 if op.output[0] not in self.input_usages:
-                    raise Exception("""StopGradient's output '{}' is orphan.
+                    raise ValueError("""StopGradient's output '{}' is orphan.
 You typically want to specify same input and output for
 StopGradient. Op:\n\n{}""".format(op.output[0], str(op)))
 
@@ -1928,7 +1928,7 @@ class Net(object):
             for op in self._net.op:
                 op.engine = "CUDNN"
     def RunAllOnMKL(self):
-        """A convenient function to run everything on the GPU."""
+        """A convenient function to run everything using MKLDNN."""
         device_option = caffe2_pb2.DeviceOption()
         device_option.device_type = caffe2_pb2.MKLDNN
         self._net.device_option.CopyFrom(device_option)

@@ -43,12 +43,12 @@ void ProfDAGNet::ValidateOpTensorDevices() {
   }
 }
 
-bool ProfDAGNet::Run() {
+bool ProfDAGNet::RunAsync() {
   runs_++;
 
   // don't collect statistics from first run
   if (runs_ <= 1) {
-    bool success = DAGNetBase::Run();
+    bool success = DAGNetBase::RunAsync();
     ValidateOpTensorDevices();
     return success;
   }
@@ -63,7 +63,7 @@ bool ProfDAGNet::Run() {
 
   // create a copy and later collect the differences
   vector<Stats> time_per_op_run(time_per_op_);
-  bool success = DAGNetBase::Run();
+  bool success = DAGNetBase::RunAsync();
 
   // aggregate this run's stats per operator type
   CaffeMap<string, float> time_per_op_type_run;
@@ -72,6 +72,7 @@ bool ProfDAGNet::Run() {
     const string& op_type = node.operator_->debug_def().type();
     time_per_op_type_run[op_type] +=
         time_per_op_[idx].sum - time_per_op_run[idx].sum;
+    time_per_op_type_[op_type].cnt += 1;
   }
 
   for (const auto& item : time_per_op_type_run) {
@@ -161,7 +162,8 @@ void ProfDAGNet::PrintStats() {
     float stddev = std::sqrt(item.second.sqrsum / measured_runs - mean * mean);
     LOG(INFO) << std::setw(10) << std::setfill(' ') << mean << " ms/iter ("
               << std::setw(10) << std::setfill(' ') << stddev << " ms/iter) "
-              << item.first;
+              << " Count per iter: " << (item.second.cnt / measured_runs)
+              << "  " << item.first;
   }
 }
 
