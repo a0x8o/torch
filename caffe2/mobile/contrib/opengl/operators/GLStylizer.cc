@@ -4,6 +4,7 @@
 #include "../core/GLFilter.h"
 #include "../core/GLImage.h"
 #include "../core/ImageAllocator.h"
+
 #include "caffe2/core/common.h"
 #include "caffe2/core/context.h"
 #include "caffe2/core/operator.h"
@@ -22,12 +23,10 @@ class GLStylizer : public GLFilter {
       : GLFilter(_deprocess ? "GLDeStylizer" : "GLStylizer",
                  vertex_shader,
                  fragment_shader,
-                 std::vector<binding*>(
-                     {BINDING(inputData), BINDING(mean), BINDING(noise_std), BINDING(outputSize)}),
+                 std::vector<binding*>({BINDING(inputData), BINDING(mean), BINDING(noise_std), BINDING(outputSize)}),
                  {/* no uniform blocks */},
                  {/* no attributes */},
-                 {{"DEPROCESS", caffe2::to_string(_deprocess)},
-                  {"RGBAINPUT", caffe2::to_string(input_format)}}),
+                 {{"DEPROCESS", caffe2::to_string(_deprocess)}, {"RGBAINPUT", caffe2::to_string(input_format)}}),
         deprocess(_deprocess) {}
 
   template <typename T1, typename T2>
@@ -157,6 +156,9 @@ class OpenGLTensorToTextureStylizerPreprocessOp : public Operator<CPUContext>,
     // get the buffers from input tensors
     const float* mean_buffer = mean.template data<float>();
     const uint8_t* input_buffer = input.template data<uint8_t>();
+
+    // set up the OpenGL context
+    GLContext::getGLContext()->set_context();
 
     GLImageVector<float16_t>* output_images = ImageAllocator<float16_t>::newImage(num_images,
                                                                                   input_width,
