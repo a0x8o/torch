@@ -8,13 +8,7 @@ from __future__ import unicode_literals
 import sys
 import copy
 import inspect
-try:
-    from past.builtins import basestring
-except ImportError:
-    print("You don't have the past package installed. ",
-          "This is necessary for python 2/3 compatibility. ",
-          "To do this, do 'pip install future'.")
-    sys.exit(1)
+from past.builtins import basestring
 from caffe2.python.model_helper import ModelHelper
 
 # flake8: noqa
@@ -50,6 +44,7 @@ class HelperWrapper(object):
         'spatial_bn': spatial_bn,
         'relu': relu,
         'prelu': prelu,
+        'tanh': tanh,
         'concat': concat,
         'depth_concat': depth_concat,
         'sum': sum,
@@ -65,6 +60,8 @@ class HelperWrapper(object):
         'video_input': video_input,
         'add_weight_decay': add_weight_decay,
         'elementwise_linear': elementwise_linear,
+        'layer_norm': layer_norm,
+        'batch_mat_mul' : batch_mat_mul,
     }
 
     def __init__(self, wrapped):

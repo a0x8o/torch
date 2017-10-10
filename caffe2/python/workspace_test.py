@@ -385,7 +385,6 @@ class TestCWorkspace(htu.HypothesisTestCase):
 
     @given(name=st.text(), value=st.floats(min_value=-1, max_value=1.0))
     def test_operator_run(self, name, value):
-        name = name.encode('ascii', 'ignore')
         ws = workspace.C.Workspace()
         op = core.CreateOperator(
             "ConstantFill", [], [name], shape=[1], value=value)
@@ -398,7 +397,6 @@ class TestCWorkspace(htu.HypothesisTestCase):
            net_name=st.text(),
            value=st.floats(min_value=-1, max_value=1.0))
     def test_net_run(self, blob_name, net_name, value):
-        blob_name = blob_name.encode('ascii', 'ignore')
         ws = workspace.C.Workspace()
         net = core.Net(net_name)
         net.ConstantFill([], [blob_name], shape=[1], value=value)
@@ -413,7 +411,6 @@ class TestCWorkspace(htu.HypothesisTestCase):
            plan_name=st.text(),
            value=st.floats(min_value=-1, max_value=1.0))
     def test_plan_run(self, blob_name, plan_name, net_name, value):
-        blob_name = blob_name.encode('ascii', 'ignore')
         ws = workspace.C.Workspace()
         plan = core.Plan(plan_name)
         net = core.Net(net_name)
@@ -431,7 +428,6 @@ class TestCWorkspace(htu.HypothesisTestCase):
            net_name=st.text(),
            value=st.floats(min_value=-1, max_value=1.0))
     def test_net_create(self, blob_name, net_name, value):
-        blob_name = blob_name.encode('ascii', 'ignore')
         ws = workspace.C.Workspace()
         net = core.Net(net_name)
         net.ConstantFill([], [blob_name], shape=[1], value=value)
@@ -514,6 +510,86 @@ class TestPredictor(unittest.TestCase):
         outputs = self.predictor.run([inputs])
         np.testing.assert_array_almost_equal(
             np.array([[516, 516]], dtype='float32'), outputs)
+
+
+class TestTransform(htu.HypothesisTestCase):
+    @given(input_dim=st.integers(min_value=1, max_value=10),
+           output_dim=st.integers(min_value=1, max_value=10),
+           batch_size=st.integers(min_value=1, max_value=10))
+    def test_simple_transform(self, input_dim, output_dim, batch_size):
+        m = model_helper.ModelHelper()
+        fc1 = brew.fc(m, "data", "fc1", dim_in=input_dim, dim_out=output_dim)
+        fc2 = brew.fc(m, fc1, "fc2", dim_in=output_dim, dim_out=output_dim)
+        conv = brew.conv(m, fc2, "conv",
+                            dim_in=output_dim,
+                            dim_out=output_dim,
+                            use_cudnn=True,
+                            engine="CUDNN",
+                            kernel=3)
+
+        conv.Relu([], conv)\
+           .Softmax([], "pred") \
+           .LabelCrossEntropy(["label"], ["xent"]) \
+           .AveragedLoss([], "loss")
+
+        transformed_net_proto = workspace.ApplyTransform(
+            "ConvToNNPack",
+            m.net.Proto())
+
+        self.assertEqual(transformed_net_proto.op[2].engine, "NNPACK")
+
+    @given(input_dim=st.integers(min_value=1, max_value=10),
+           output_dim=st.integers(min_value=1, max_value=10),
+           batch_size=st.integers(min_value=1, max_value=10))
+    def test_registry_invalid(self, input_dim, output_dim, batch_size):
+        m = model_helper.ModelHelper()
+        brew.fc(m, "data", "fc1", dim_in=input_dim, dim_out=output_dim)
+        with self.assertRaises(RuntimeError):
+            workspace.ApplyTransform(
+                "definitely_not_a_real_transform",
+                m.net.Proto())
+
+    @given(value=st.floats(min_value=-1, max_value=1))
+    def test_apply_transform_if_faster(self, value):
+
+        init_net = core.Net("init_net")
+        init_net.ConstantFill([], ["data"], shape=[5, 5, 5, 5], value=value)
+        init_net.ConstantFill([], ["conv_w"], shape=[5, 5, 3, 3], value=value)
+        init_net.ConstantFill([], ["conv_b"], shape=[5], value=value)
+
+        self.assertEqual(
+            workspace.RunNetOnce(init_net.Proto().SerializeToString()), True)
+
+        m = model_helper.ModelHelper()
+        conv = brew.conv(m, "data", "conv",
+                            dim_in=5,
+                            dim_out=5,
+                            kernel=3,
+                            use_cudnn=True,
+                            engine="CUDNN")
+
+        conv.Relu([], conv)\
+           .Softmax([], "pred") \
+           .AveragedLoss([], "loss")
+
+        self.assertEqual(
+            workspace.RunNetOnce(m.net.Proto().SerializeToString()), True)
+
+        proto = workspace.ApplyTransformIfFaster(
+            "ConvToNNPack",
+            m.net.Proto(),
+            init_net.Proto())
+        self.assertEqual(
+            workspace.RunNetOnce(proto.SerializeToString()), True)
+        proto = workspace.ApplyTransformIfFaster(
+            "ConvToNNPack",
+            m.net.Proto(),
+            init_net.Proto(),
+            warmup_runs=10,
+            main_runs=100,
+            improvement_threshold=2.0)
+        self.assertEqual(
+            workspace.RunNetOnce(proto.SerializeToString()), True)
 
 
 if __name__ == '__main__':

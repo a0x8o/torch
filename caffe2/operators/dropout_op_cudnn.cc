@@ -13,18 +13,78 @@ class CuDNNDropoutOp final : public Operator<CUDAContext> {
       : Operator<CUDAContext>(operator_def, ws),
         cudnn_wrapper_(&context_),
         ratio_(OperatorBase::GetSingleArgument<float>("ratio", 0.5)),
-        is_test_(OperatorBase::GetSingleArgument<int>("is_test", 0)) {
-    DCHECK_GE(ratio_, 0);
-    DCHECK_LT(ratio_, 1);
+        is_test_(
+            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)) {
+    CAFFE_ENFORCE_GE(ratio_, 0);
+    CAFFE_ENFORCE_LT(ratio_, 1);
     CUDNN_ENFORCE(cudnnCreateTensorDescriptor(&data_desc_));
 
     CUDNN_ENFORCE(cudnnCreateDropoutDescriptor(&dropout_desc_));
     CUDNN_ENFORCE(cudnnDropoutGetStatesSize(
         cudnn_wrapper_.inline_cudnn_handle(),
         reinterpret_cast<size_t*>(&states_size_in_bytes_)));
+
+    if (!is_test_) {
+      scratch_blob_ = ws->CreateBlob(scratch_blob_name(operator_def.output(1)));
+      CAFFE_ENFORCE(scratch_blob_);
+    }
   }
 
-  ~CuDNNDropoutOp() {
+  ~CuDNNDropoutOp() noexcept {
+    CUDNN_ENFORCE(cudnnDestroyTensorDescriptor(data_desc_));
+    CUDNN_ENFORCE(cudnnDestroyDropoutDescriptor(dropout_desc_));
+  }
+
+  template <typename T, typename M>
+  bool DoRunWithType();
+
+  bool RunOnDevice() override;
+
+  static string scratch_blob_name(string mask_blob_name) {
+    return "cudnn_dropout_scratch_" + mask_blob_name;
+  }
+
+ protected:
+  CuDNNWrapper cudnn_wrapper_;
+  cudnnTensorDescriptor_t data_desc_;
+  cudnnDropoutDescriptor_t dropout_desc_;
+
+  vector<TIndex> cudnn_input_dims_;
+
+  float ratio_;
+  bool is_test_;
+
+  Blob* scratch_blob_ = nullptr;
+
+  size_t states_size_in_bytes_, reserve_space_size_in_bytes_;
+  // Input: X, Output: Y, mask_and_states
+};
+
+class CuDNNDropoutGradientOp final : public Operator<CUDAContext> {
+ public:
+  USE_OPERATOR_FUNCTIONS(CUDAContext);
+  CuDNNDropoutGradientOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator<CUDAContext>(operator_def, ws),
+        cudnn_wrapper_(&context_),
+        ratio_(OperatorBase::GetSingleArgument<float>("ratio", 0.5)),
+        is_test_(
+            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)) {
+    CAFFE_ENFORCE_GE(ratio_, 0);
+    CAFFE_ENFORCE_LT(ratio_, 1);
+    CUDNN_ENFORCE(cudnnCreateTensorDescriptor(&data_desc_));
+
+    CUDNN_ENFORCE(cudnnCreateDropoutDescriptor(&dropout_desc_));
+    CUDNN_ENFORCE(cudnnDropoutGetStatesSize(
+        cudnn_wrapper_.inline_cudnn_handle(),
+        reinterpret_cast<size_t*>(&states_size_in_bytes_)));
+
+    // Share scratch with the forward op
+    scratch_blob_ =
+        ws->GetBlob(CuDNNDropoutOp::scratch_blob_name(operator_def.input(1)));
+    CAFFE_ENFORCE(scratch_blob_);
+  }
+
+  ~CuDNNDropoutGradientOp() noexcept {
     CUDNN_ENFORCE(cudnnDestroyTensorDescriptor(data_desc_));
     CUDNN_ENFORCE(cudnnDestroyDropoutDescriptor(dropout_desc_));
   }
@@ -41,102 +101,24 @@ class CuDNNDropoutOp final : public Operator<CUDAContext> {
 
   vector<TIndex> cudnn_input_dims_;
 
-  float ratio_;
-  bool is_test_;
-
-  int states_size_in_bytes_, reserve_space_size_in_bytes_;
-  // Input: X, Output: Y, mask, states
-};
-
-class CuDNNDropoutGradientOp final : public Operator<CUDAContext> {
- public:
-  USE_OPERATOR_FUNCTIONS(CUDAContext);
-  CuDNNDropoutGradientOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<CUDAContext>(operator_def, ws),
-        cudnn_wrapper_(&context_),
-        ratio_(OperatorBase::GetSingleArgument<float>("ratio", 0.5)),
-        is_test_(OperatorBase::GetSingleArgument<int>("is_test", 0)) {
-    DCHECK_GE(ratio_, 0);
-    DCHECK_LT(ratio_, 1);
-    CUDNN_ENFORCE(cudnnCreateTensorDescriptor(&data_desc_));
-
-    CUDNN_ENFORCE(cudnnCreateDropoutDescriptor(&dropout_desc_));
-    CUDNN_ENFORCE(cudnnDropoutGetStatesSize(
-        cudnn_wrapper_.inline_cudnn_handle(),
-        reinterpret_cast<size_t*>(&states_size_in_bytes_)));
-  }
-
-  ~CuDNNDropoutGradientOp() {
-    CUDNN_ENFORCE(cudnnDestroyTensorDescriptor(data_desc_));
-  }
-
-  template <typename T, typename M>
-  bool DoRunWithType();
-
-  bool RunOnDevice() override;
-
- protected:
-  CuDNNWrapper cudnn_wrapper_;
-  cudnnTensorDescriptor_t data_desc_;
-  cudnnDropoutDescriptor_t dropout_desc_;
-
-  vector<TIndex> cudnn_input_dims_;
+  Blob* scratch_blob_;
 
   float ratio_;
   bool is_test_;
 
-  int states_size_in_bytes_, reserve_space_size_in_bytes_;
-  // Input: dY, states, Output: dX
+  size_t states_size_in_bytes_, reserve_space_size_in_bytes_;
+  // Input: dY, mask_and_states, Output: dX
 };
 
 template <typename T, typename M>
 bool CuDNNDropoutOp::DoRunWithType() {
   const auto& X = Input(0);
   auto* Y = Output(0);
-  auto* reserve = Output(1);
 
   auto size_prod = 1;
   for (auto dim : X.dims()) {
     size_prod *= dim;
   }
-
-  // Reshape tensor descriptors if necessary
-  if (X.dims() != cudnn_input_dims_) {
-    VLOG(1) << "Setting descriptors";
-    cudnn_input_dims_ = X.dims();
-    CUDNN_ENFORCE(cudnnSetTensor4dDescriptor(
-        data_desc_,
-        GetCudnnTensorFormat(StorageOrder::NCHW),
-        cudnnTypeWrapper<T>::type,
-        size_prod,
-        1,
-        1,
-        1));
-    // get the reserve space we need
-    CUDNN_ENFORCE(cudnnDropoutGetReserveSpaceSize(
-        data_desc_, reinterpret_cast<size_t*>(&reserve_space_size_in_bytes_)));
-    // store both reserve and states in the same tensor
-    int elem_size = static_cast<int>(sizeof(T));
-    vector<int> state_size{
-        (reserve_space_size_in_bytes_ + states_size_in_bytes_ + elem_size) /
-        elem_size};
-    // resize the output
-    reserve->Resize(state_size);
-
-    // make sure that meta is set
-    T* reserve_data = reserve->template mutable_data<T>();
-
-    // set the dropout descriptor
-    CUDNN_ENFORCE(cudnnSetDropoutDescriptor(
-        dropout_desc_,
-        cudnn_wrapper_.inline_cudnn_handle(),
-        ratio_,
-        reserve_data + reserve_space_size_in_bytes_ / elem_size,
-        states_size_in_bytes_,
-        0 // seed
-        ));
-  }
-
   // now actually run the computation
   if (is_test_) {
     if (Y != &X) {
@@ -145,6 +127,45 @@ bool CuDNNDropoutOp::DoRunWithType() {
     }
     return true;
   } else {
+    auto* mask = Output(1);
+    // Reshape tensor descriptors if necessary
+    if (X.dims() != cudnn_input_dims_ && !is_test_) {
+      CAFFE_ENFORCE(scratch_blob_);
+      Tensor<CUDAContext>* states =
+          scratch_blob_->GetMutable<Tensor<CUDAContext>>();
+      cudnn_input_dims_ = X.dims();
+      CUDNN_ENFORCE(cudnnSetTensor4dDescriptor(
+          data_desc_,
+          GetCudnnTensorFormat(StorageOrder::NCHW),
+          cudnnTypeWrapper<T>::type,
+          size_prod,
+          1,
+          1,
+          1));
+
+      // get the reserve space we need
+      CUDNN_ENFORCE(cudnnDropoutGetReserveSpaceSize(
+          data_desc_, &reserve_space_size_in_bytes_));
+
+      mask->Resize(reserve_space_size_in_bytes_);
+      states->Resize(states_size_in_bytes_);
+
+      // set the dropout descriptor (note: need to allocate the states data
+      // before acquiring the mutex)
+      uint8_t* states_data = states->mutable_data<uint8_t>();
+      {
+        // Need to protect  as clashes with NCCL
+        std::lock_guard<std::mutex> lk(CUDAContext::mutex());
+        CUDNN_ENFORCE(cudnnSetDropoutDescriptor(
+            dropout_desc_,
+            cudnn_wrapper_.inline_cudnn_handle(),
+            ratio_,
+            states_data,
+            states_size_in_bytes_,
+            0 // seed
+            ));
+      }
+    }
     CUDNN_ENFORCE(cudnnDropoutForward(
         cudnn_wrapper_.inline_cudnn_handle(),
         dropout_desc_,
@@ -152,7 +173,7 @@ bool CuDNNDropoutOp::DoRunWithType() {
         X.template data<T>(),
         data_desc_,
         Y->template mutable_data<T>(),
-        reserve->raw_mutable_data(),
+        mask->mutable_data<uint8_t>(),
         reserve_space_size_in_bytes_));
   }
   return true;
@@ -175,7 +196,8 @@ bool CuDNNDropoutOp::RunOnDevice() {
 template <typename T, typename M>
 bool CuDNNDropoutGradientOp::DoRunWithType() {
   const auto& dY = Input(0);
-  const auto& states = Input(1);
+  const auto& mask = Input(1);
+  const Tensor<CUDAContext>& states = scratch_blob_->Get<Tensor<CUDAContext>>();
   auto* dX = Output(0);
 
   auto size_prod = 1;
@@ -193,24 +215,28 @@ bool CuDNNDropoutGradientOp::DoRunWithType() {
         1,
         1,
         1));
+
     // get the reserve space we need
     CUDNN_ENFORCE(cudnnDropoutGetReserveSpaceSize(
-        data_desc_, reinterpret_cast<size_t*>(&reserve_space_size_in_bytes_)));
+        data_desc_, &reserve_space_size_in_bytes_));
 
-    const int elem_size = static_cast<int>(sizeof(T));
     // set the dropout descriptor
-    CUDNN_ENFORCE(cudnnSetDropoutDescriptor(
-        dropout_desc_,
-        cudnn_wrapper_.inline_cudnn_handle(),
-        ratio_,
-        const_cast<T*>(states.template data<T>()) +
-            reserve_space_size_in_bytes_ / elem_size,
-        states_size_in_bytes_,
-        0 // seed
-        ));
+    {
+      // Need to protect  as clashes with NCCL
+      std::lock_guard<std::mutex> lk(CUDAContext::mutex());
+      CUDNN_ENFORCE(cudnnSetDropoutDescriptor(
+          dropout_desc_,
+          cudnn_wrapper_.inline_cudnn_handle(),
+          ratio_,
+          const_cast<uint8_t*>(states.data<uint8_t>()),
+          states_size_in_bytes_,
+          0 // seed
+          ));
+    }
   }
 
   // run the computation
+  void* mask_data = const_cast<void*>(mask.raw_data());
   CUDNN_ENFORCE(cudnnDropoutBackward(
       cudnn_wrapper_.inline_cudnn_handle(),
       dropout_desc_,
@@ -218,7 +244,7 @@ bool CuDNNDropoutGradientOp::DoRunWithType() {
       dY.data<T>(),
       data_desc_,
       dX->template mutable_data<T>(),
-      const_cast<void*>(states.raw_data()),
+      mask_data,
       reserve_space_size_in_bytes_));
   return true;
 }
@@ -226,7 +252,6 @@ bool CuDNNDropoutGradientOp::DoRunWithType() {
 bool CuDNNDropoutGradientOp::RunOnDevice() {
   // dispatch based on contents of tensor(s)
   const auto& dY = Input(0);
-  const auto& states = Input(1);
   auto* dX = Output(0);
 
   dX->ResizeLike(dY);

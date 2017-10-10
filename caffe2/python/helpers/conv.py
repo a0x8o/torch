@@ -36,7 +36,22 @@ def _ConvBase(
         else:
             kernels = kernel
     else:
-        kernels = [kernel] * 2
+        if isinstance(kernel, list):
+            assert len(kernel) == 2, "Conv support only a 2D kernel."
+            kernels = kernel
+        else:
+            kernels = [kernel] * 2
+
+    requested_engine = kwargs.get('engine')
+    if requested_engine is not None:
+        if use_cudnn and requested_engine != 'CUDNN':
+            raise ValueError(
+                'When use_cudnn=True, the only engine you can specify is '
+                '"CUDNN"')
+        elif not use_cudnn and requested_engine == 'CUDNN':
+            raise ValueError(
+                'When use_cudnn=False, the only engine you can specify is '
+                '""')
 
     if use_cudnn:
         kwargs['engine'] = 'CUDNN'
@@ -55,10 +70,10 @@ def _ConvBase(
         weight_shape.extend(kernels)
         weight_shape.append(int(dim_in / group))
 
-    weight_initializer = initializers.update_initializer(
+    WeightInitializer = initializers.update_initializer(
         WeightInitializer, weight_init, ("XavierFill", {})
     )
-    bias_initializer = initializers.update_initializer(
+    BiasInitializer = initializers.update_initializer(
         BiasInitializer, bias_init, ("ConstantFill", {})
     )
     if not model.init_params:
@@ -68,14 +83,14 @@ def _ConvBase(
     weight = model.create_param(
         param_name=blob_out + '_w',
         shape=weight_shape,
-        initializer=weight_initializer,
+        initializer=WeightInitializer,
         tags=ParameterTags.WEIGHT
     )
     if use_bias:
         bias = model.create_param(
             param_name=blob_out + '_b',
             shape=[dim_out, ],
-            initializer=bias_initializer,
+            initializer=BiasInitializer,
             tags=ParameterTags.BIAS
         )
 
@@ -102,12 +117,22 @@ def _ConvBase(
             order=order,
             **kwargs)
     else:
-        return model.net.Conv(
-            inputs,
-            blob_out,
-            kernel=kernel,
-            order=order,
-            **kwargs)
+        if isinstance(kernel, list):
+            return model.net.Conv(
+                inputs,
+                blob_out,
+                kernel_h=kernel[0],
+                kernel_w=kernel[1],
+                order=order,
+                **kwargs)
+        else:
+            return model.net.Conv(
+                inputs,
+                blob_out,
+                kernel=kernel,
+                order=order,
+                **kwargs)
+
 
 
 def conv_nd(

@@ -6,10 +6,17 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 from caffe2.python import core, model_helper, schema
+from caffe2.python.modeling.parameter_sharing import (
+    parameter_sharing_context,
+)
+from caffe2.python.optimizer import get_param_device
 from caffe2.python.layers import layers
+from caffe2.proto import caffe2_pb2
+from future.utils import viewitems
 
 import logging
 import numpy as np
+import six
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +60,10 @@ class LayerModelHelper(model_helper.ModelHelper):
 
         self._init_global_constants()
         self.param_init_net = self.create_init_net('param_init_net')
+        self._initialize_params = True
+
+    def set_initialize_params(self, initialize_params):
+        self._initialize_params = initialize_params
 
     def add_metric_field(self, name, value):
         assert name not in self._metrics_schema.fields, (
@@ -109,7 +120,6 @@ class LayerModelHelper(model_helper.ModelHelper):
         self.add_global_constant('ONE', 1.0)
         self.add_global_constant('ZERO', 0.0)
         self.add_global_constant('ZERO_RANGE', [0, 0], dtype='int32')
-        self.add_global_constant('OFFLINE_TRAINING', True, dtype='bool')
 
     def _add_global_constants(self, init_net):
         for initializer_op in self.global_constant_initializers:
@@ -119,6 +129,46 @@ class LayerModelHelper(model_helper.ModelHelper):
         init_net = core.Net(name)
         self._add_global_constants(init_net)
         return init_net
+
+    def create_param(self, param_name, shape, initializer, optimizer=None,
+                     ps_param=None):
+        if isinstance(param_name, core.BlobReference):
+            param_name = str(param_name)
+        elif isinstance(param_name, six.string_types):
+            # Parameter name will be equal to current Namescope that got
+            # resolved with the respect of parameter sharing of the scopes.
+            param_name = parameter_sharing_context.get_parameter_name(
+                param_name)
+        else:
+            raise "Unsupported type for param_name"
+
+        param_blob = core.BlobReference(param_name)
+
+        if len(initializer) == 1:
+            init_op_args = {}
+        else:
+            assert len(initializer) == 2
+            init_op_args = initializer[1]
+        if shape is not None:
+            init_op_args.update({'shape': shape})
+
+        initializer_op = None
+        if self._initialize_params:
+            initializer_op = core.CreateOperator(
+                initializer[0],
+                [],
+                param_blob,
+                **init_op_args
+            )
+
+        param = layers.LayerParameter(
+            parameter=param_blob,
+            initializer=initializer_op,
+            optimizer=optimizer,
+            ps_param=ps_param,
+        )
+
+        return param
 
     def next_layer_name(self, prefix):
         base_name = core.ScopedName(prefix)
@@ -135,8 +185,11 @@ class LayerModelHelper(model_helper.ModelHelper):
         self._layers.append(layer)
         for param in layer.get_parameters():
             assert isinstance(param.parameter, core.BlobReference)
+
             self.param_to_optim[str(param.parameter)] = \
                 param.optimizer or self.default_optimizer
+
+            self.params.append(param.parameter)
 
         # The primary value of adding everything to self.net - generation of the
         # operators right away, i.e. if error happens it'll be detected
@@ -199,6 +252,23 @@ class LayerModelHelper(model_helper.ModelHelper):
         assert self._loss is None
         self._loss = loss
 
+    def add_loss(self, loss, name='unnamed'):
+        assert loss is not None, "Added loss should not be None"
+        assert isinstance(loss, schema.Scalar) or isinstance(
+            loss, schema.Struct
+        ), "Added loss should be a scalar or a struct"
+        if self._loss is None:
+            self._loss = schema.Struct((name, loss))
+        else:
+            prefix_base = name + '_auto_'
+            index = 0
+            prefix = name
+            while prefix in self._loss:
+                prefix = prefix_base + str(index)
+                index += 1
+            loss_struct = schema.Struct((prefix, loss))
+            self._loss = self._loss + loss_struct
+
     def __getattr__(self, layer):
         if layer.startswith('__'):
             raise AttributeError(layer)
@@ -227,20 +297,36 @@ class LayerModelHelper(model_helper.ModelHelper):
             return wrapper
         else:
             raise ValueError(
-                "Tring to create non-registered layer: {0}".format(layer))
+                "Trying to create non-registered layer: {}".format(layer))
 
     @property
     def layers(self):
         return self._layers
 
-    def apply_optimizers(self, train_net, train_init_net, grad_map):
-        for param, optimizer in self.param_to_optim.items():
+    def apply_optimizers(
+        self,
+        train_net,
+        train_init_net,
+        grad_map,
+        blob_to_device=None,
+    ):
+        CPU = core.DeviceOption(caffe2_pb2.CPU)
+        # if given, blob_to_device is a map from blob to device_option
+        blob_to_device = blob_to_device or {}
+        for param, optimizer in viewitems(self.param_to_optim):
             assert optimizer is not None, \
                 "default optimizer must have been set in add_layer"
             # note that not all params has gradient and thus we sent None if
-            # gradient does not exist
-            optimizer(
-                train_net, train_init_net, param, grad_map.get(str(param)))
+            # gradient does not exists
+            device = get_param_device(
+                param,
+                grad_map.get(str(param)),
+                param_to_device=blob_to_device,
+                default_device=CPU,
+            )
+            with core.DeviceScope(device):
+                optimizer(
+                    train_net, train_init_net, param, grad_map.get(str(param)))
 
     def _GetOne(self):
         return self.global_constants['ONE']

@@ -5,24 +5,20 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from collections import namedtuple, OrderedDict
-try:
-    from past.builtins import basestring
-except ImportError:
-    print("You don't have the past package installed. ",
-          "This is necessary for python 2/3 compatibility. ",
-          "To do this, do 'pip install future'.")
-    import sys
-    sys.exit(1)
+from collections import namedtuple, OrderedDict, defaultdict
+from past.builtins import basestring
+from future.utils import viewitems, viewkeys, viewvalues
+from itertools import chain
+from six import binary_type, string_types, text_type
 
 from caffe2.proto import caffe2_pb2
-from collections import defaultdict
 from caffe2.python import scope, utils, workspace
+from caffe2.python.control_ops_grad import gen_do_gradient, gen_if_gradient
+
 import caffe2.python._import_c_extension as C
+import google.protobuf.text_format as protobuftx
 import pickle
 import numpy as np
-import uuid
-import traceback
 import sys
 
 # Mac os specific message
@@ -139,7 +135,12 @@ class BlobReference(object):
         Note that this does not prepends the namescope. If needed, use
         ScopedBlobReference() to prepend the existing namespace.
         """
-        self._name = name
+        if isinstance(name, string_types):
+            self._name = name
+        elif isinstance(name, binary_type):
+            self._name = name.decode('utf-8')
+        else:
+            self._name = str(name)
         self._from_net = net
         # meta allows helper functions to put whatever metainformation needed
         # there.
@@ -149,8 +150,10 @@ class BlobReference(object):
         return hash(self._name)
 
     def __eq__(self, other):
-        if isinstance(other, basestring):
+        if isinstance(other, string_types):
             return self._name == other
+        elif isinstance(other, binary_type):
+            return self._name == other.decode('utf-8')
         elif isinstance(other, BlobReference):
             return self._name == other._name
         else:
@@ -166,12 +169,12 @@ class BlobReference(object):
         return 'BlobReference("{}")'.format(self._name)
 
     def __add__(self, other):
-        if not isinstance(other, basestring):
+        if not isinstance(other, string_types):
             raise RuntimeError('Cannot add BlobReference to a non-string.')
         return BlobReference(self._name + other, self._from_net)
 
     def __radd__(self, other):
-        if not isinstance(other, basestring):
+        if not isinstance(other, string_types):
             raise RuntimeError('Cannot add a non-string to BlobReference.')
         return BlobReference(other + self._name, self._from_net)
 
@@ -186,7 +189,7 @@ class BlobReference(object):
         network's __getattr__ function.
         """
         inputs = [] if inputs is None else inputs
-        if isinstance(inputs, BlobReference) or isinstance(inputs, str):
+        if isinstance(inputs, BlobReference) or isinstance(inputs, string_types):
             inputs = [inputs]
         # add self to the input list.
         inputs.insert(0, self)
@@ -221,15 +224,16 @@ class BlobReference(object):
             op
             for op in _REGISTERED_OPERATORS
             if '_ENGINE_' not in op or '_ENGINE_CUDNN' in op]
-        return sorted(set(
-            dir(type(self)) +
-            self.__dict__.keys() +
-            additional_methods))
+        return sorted(set(chain(
+            dir(type(self)),
+            viewkeys(self.__dict__),
+            additional_methods
+        )))
 
 
 def ScopedName(name):
     """prefix the name with the current scope."""
-    if isinstance(name, bytes):
+    if isinstance(name, binary_type):
         name = name.decode('ascii')
     return scope.CurrentNameScope() + name
 
@@ -243,7 +247,7 @@ def _RectifyInputOutput(blobs, net=None):
     """A helper function to rectify the input or output of the CreateOperator
     interface.
     """
-    if isinstance(blobs, basestring):
+    if isinstance(blobs, string_types) or isinstance(blobs, binary_type):
         # If blobs is a single string, prepend scope.CurrentNameScope()
         # and put it as a list.
         # TODO(jiayq): enforce using BlobReference instead of raw strings.
@@ -255,7 +259,7 @@ def _RectifyInputOutput(blobs, net=None):
         # If blob is a list, we go through it and type check.
         rectified = []
         for blob in blobs:
-            if isinstance(blob, basestring):
+            if isinstance(blob, string_types) or isinstance(blob, binary_type):
                 rectified.append(ScopedBlobReference(blob, net=net))
             elif type(blob) is BlobReference:
                 rectified.append(blob)
@@ -292,11 +296,11 @@ def CreateOperator(
     # Add rectified inputs and outputs
     inputs = _RectifyInputOutput(inputs)
     outputs = _RectifyInputOutput(outputs)
-    operator.input.extend([str(i) for i in inputs])
-    operator.output.extend([str(o) for o in outputs])
+    operator.input.extend([text_type(i) for i in inputs])
+    operator.output.extend([text_type(o) for o in outputs])
     if control_input:
         control_input = _RectifyInputOutput(control_input)
-        operator.control_input.extend([str(i) for i in control_input])
+        operator.control_input.extend([text_type(i) for i in control_input])
     # Set device option:
     # (1) If device_option is explicitly set, use device_option.
     # (2) If not, but scope.CurrentDeviceScope() is set,
@@ -310,6 +314,7 @@ def CreateOperator(
         operator.engine = engine
     # random seed is defined in the device option, so we need to do special
     # care.
+
     if 'random_seed' in kwargs:
         operator.device_option.random_seed = kwargs['random_seed']
         del kwargs['random_seed']
@@ -317,20 +322,9 @@ def CreateOperator(
     if arg is not None:
         operator.arg.extend(arg)
     # Add all other arguments
-    for key, value in kwargs.items():
+    for key, value in viewitems(kwargs):
         operator.arg.add().CopyFrom(utils.MakeArgument(key, value))
-    operator.uuid = uuid.uuid4().int >> 64
-    stack = traceback.extract_stack()
 
-    # string part of the stack that belongs to this file
-
-    for i, line in reversed(list(enumerate(stack))):
-        # get path of the core.py file
-        name = __name__.replace('.', '/') + ".py"
-        if name not in ' '.join(map(str, line)):
-            break
-
-    workspace.operator_tracebacks[operator.uuid] = stack[:i + 1]
     if workspace.IsImmediate():
         workspace.RunOperatorImmediate(operator)
     return operator
@@ -427,9 +421,23 @@ class IR(object):
         self.frontier = defaultdict(int)
         self.gradient_frontier = {}
         self.gradient_generators = defaultdict(lambda: defaultdict(list))
+        self.out_version_history = defaultdict(list)
+        self.in_version_history = defaultdict(list)
 
         for op in operators:
             self.Play(op)
+
+        self.SanityCheck(operators)
+
+    def SanityCheck(self, operators):
+        # Validate StopGradient usage by checking that StopGradient's output
+        # is actually passed forward
+        for op in operators:
+            if op.type == 'StopGradient':
+                if op.output[0] not in self.input_usages:
+                    raise ValueError("""StopGradient's output '{}' is orphan.
+You typically want to specify same input and output for
+StopGradient. Op:\n\n{}""".format(op.output[0], str(op)))
 
     def Play(self, op):
         """"Adds an op to the current IR, and update the internal states to
@@ -440,6 +448,7 @@ class IR(object):
         for s in op.input:
             in_versions[s] = self.frontier[s]
             self.input_usages[s][self.frontier[s]].append(len(self.ssa))
+            self.in_version_history[s].append((op, self.frontier[s]))
         # For output, they are the current version plus one. If this is a
         # newly created blob, its version starts with zero.
         out_versions = {}
@@ -447,6 +456,7 @@ class IR(object):
             if s in self.frontier:
                 self.frontier[s] += 1
             out_versions[s] = self.frontier[s]
+            self.out_version_history[s].append((op, self.frontier[s]))
         # Add to SSA for bookkeeping.
         self.ssa.append(OpSSA(op, in_versions, out_versions))
 
@@ -455,6 +465,26 @@ class IR(object):
         """Checks if the gradient operators can be correctly carried out."""
         forward_op, in_versions, out_versions = self.ssa[fwd_op_idx]
         original_index = GetIndexFromGradientList(g_output, grad_op_input)
+
+        # Functions to generate debug help for version-mismatches
+        def versionMismatchInfoOut(name):
+            s = "DEBUG HELP:\n"
+            s += "Maybe you use same output blob twice for different ops?\n"
+            s += "== Version history of blob [{}]\n".format(name)
+            for (op, vers) in self.out_version_history[name]:
+                s += "Version (out) {} <-- {}".format(vers, op)
+                s += "\n"
+            return s
+
+        def versionMismatchInfoIn(name):
+            s = "DEBUG HELP:\n"
+            s += "Maybe the blob was overwritten by another op?\n"
+            s += "== Version history of blob [{}]\n".format(name)
+            for (op, vers) in self.in_version_history[name]:
+                s += "version (in) {} <-- {}".format(vers, op)
+                s += "\n"
+            return s
+
         # If it is a dense or sparse gradient name, it should match the
         # version of the corresponding output.
         if original_index is not None:
@@ -464,20 +494,21 @@ class IR(object):
                 raise RuntimeError(
                     'Gradient name "%s" is expected to correspond '
                     'to version %d of "%s", but currently we have '
-                    'version %d.' % (
+                    'version %d.\n\n' % (
                         grad_op_input, out_versions[original_name],
                         original_name,
-                        self.gradient_frontier[original_name]))
+                        self.gradient_frontier[original_name]) +
+                    versionMismatchInfoOut(original_name))
         # If it is an output name, the current version should match the
         # version when the operator was run.
         elif grad_op_input in out_versions:
             if self.frontier[grad_op_input] != out_versions[grad_op_input]:
                 raise RuntimeError(
                     'Gradient operator needs output "%s" at version'
-                    ' %d, but currently we have version %d.' % (
+                    ' %d, but currently we have version %d.\n\n' % (
                         grad_op_input, out_versions[grad_op_input],
                         self.frontier[grad_op_input]
-                    )
+                    ) + versionMismatchInfoOut(grad_op_input)
                 )
         # If it is an input name, the current version should match the
         # version when the operator was run.
@@ -485,10 +516,10 @@ class IR(object):
             if (self.frontier[grad_op_input] != in_versions[grad_op_input]):
                 raise RuntimeError(
                     'Gradient operator needs input "%s" at version '
-                    '%d, but currently we have version %d.' % (
+                    '%d, but currently we have version %d.\n\n' % (
                         grad_op_input, in_versions[grad_op_input],
                         self.frontier[grad_op_input]
-                    )
+                    ) + versionMismatchInfoIn(grad_op_input)
                 )
         # If it is none of the above, it should be a blob that is
         # generated locally by one of the previous gradient operators.
@@ -502,8 +533,8 @@ class IR(object):
 
     def AppendSparseGenerators(self, sparse_generators):
         # merge indices and values generators for sparse gradients
-        for name, input_generators in sparse_generators.items():
-            for version, generators in input_generators.items():
+        for name, input_generators in viewitems(sparse_generators):
+            for version, generators in viewitems(input_generators):
                 if len(generators) == 1:
                     # either indices or values are generated (but not both)
                     generator = generators[0]
@@ -837,7 +868,8 @@ class IR(object):
     def _GetInitGradients(self, ys):
         input_to_grad = {}
         gradient_ops = []
-        for y, g in ys.items():
+
+        for y, g in viewitems(ys):
             autograd_op = None
             if g is None:
                 autograd_op = CreateOperator(
@@ -904,7 +936,7 @@ class IR(object):
 
         # Set the gradient frontier with the initialized external
         # gradients.
-        for y, _ in ys.items():
+        for y in viewkeys(ys):
             self.gradient_frontier[y] = self.frontier[y]
             self.input_usages[str(y)][self.frontier[str(y)]].append(
                 len(self.ssa))
@@ -936,11 +968,15 @@ class IR(object):
         # operators ready. For the output map, we will convert everything to
         # BlobReferences for easier handling in python.
         all_input_to_grad_out = {}
-        for key, val in all_input_to_grad.items():
+        for key, val in viewitems(all_input_to_grad):
             if val is not None:
-                all_input_to_grad_out[BlobReference(key)] = (
-                    BlobReference(val) if isinstance(val, basestring) else
-                    GradientSlice(BlobReference(val[0]), BlobReference(val[1])))
+                if (isinstance(val, string_types) or
+                        isinstance(val, binary_type)):
+                    grad_out = BlobReference(val)
+                else:
+                    grad_out = GradientSlice(BlobReference(val[0]),
+                                             BlobReference(val[1]))
+                all_input_to_grad_out[BlobReference(key)] = grad_out
         return all_gradient_ops, all_input_to_grad_out
 
 
@@ -1042,6 +1078,10 @@ class GradientRegistry(object):
         return ir.GetBackwardPass(ys)
 
 
+GradientRegistry.RegisterGradient('Do')(gen_do_gradient)
+GradientRegistry.RegisterGradient('If')(gen_if_gradient)
+
+
 def get_ssa(net, blob_versions=None):
     """
     Given a net, return a structure containing the version of each input and
@@ -1129,6 +1169,74 @@ def get_op_ids_in_path(ssa, blob_versions, inputs, outputs):
     return sorted(used_op_ids)
 
 
+def recurrent_network_op_remap(op, prefix, blob_remap):
+    """
+    Parameters
+    ----------
+    op : Caffe2 operator (RecurrentNetworkOp or RecurrentNetworkGradientOp).
+    prefix: this argument is not used in this function, just for legacy support.
+    blob_remap : Dictionary that represents the map from old blob name to new.
+
+    Updates blob names in arguments of RecurrentNetworkOp and
+    RecurrentNetworkGradientOp to conform to cloned input and output of both
+    operators and also makes sure names of locally generated blobs in arguments
+    have the same prefix as the input and output of the operators.
+    """
+
+    def get_remapped_str(blob_str):
+        if isinstance(blob_str, binary_type):
+            blob_str = blob_str.decode('utf-8')
+        return blob_remap.get(blob_str, blob_str).encode('utf-8')
+
+    for argument in op.arg:
+        if len(argument.strings) > 0:
+            for i in range(len(argument.strings)):
+                argument.strings[i] = get_remapped_str(argument.strings[i])
+        elif argument.name == 'timestep':
+            argument.s = get_remapped_str(argument.s)
+        elif argument.name.endswith('step_net'):
+            # argument is a proto
+            remap_proto(argument, blob_remap)
+
+
+def control_op_remap(op, prefix, blob_remap):
+    net_arg_names = []
+    if op.type == "If":
+        net_arg_names = ['then_net', 'else_net']
+    else:
+        net_arg_names = ['loop_net', 'cond_net']
+    for argument in op.arg:
+        if argument.name in net_arg_names:
+            assert argument.n, \
+                "Expected non empty net in " + op.type + "'s " + argument.name + " argument"
+            subnet = Net(argument.n)
+            remapped_subnet = subnet.Clone(
+                name=(subnet._net.name if subnet._net.name else '') + '_remapped',
+                blob_remap=blob_remap)
+            argument.n.CopyFrom(remapped_subnet.Proto())
+
+
+DEFAULT_REMAP_FUNCS = {
+    'RecurrentNetwork': recurrent_network_op_remap,
+    'RecurrentNetworkGradient': recurrent_network_op_remap,
+    'If': control_op_remap,
+    'While': control_op_remap,
+}
+
+
+def remap_proto(argument, blob_remap):
+    proto = caffe2_pb2.NetDef()
+    protobuftx.Merge(argument.s.decode('utf-8'), proto)
+    subnet = Net(proto)
+
+    cloned_sub_net = subnet.Clone(
+        'cloned_sub_net',
+        blob_remap,
+    )
+
+    argument.s = str(cloned_sub_net.Proto()).encode('utf-8')
+
+
 def clone_and_bind_net(net, name, prefix, blob_remap=None, inputs=None,
                        keep_schema=True):
     """
@@ -1178,7 +1286,7 @@ def clone_and_bind_net(net, name, prefix, blob_remap=None, inputs=None,
     ssa, blob_versions = get_ssa(proto)
     undef_blobs = get_undefined_blobs(ssa)
 
-    for blob in blob_versions.keys():
+    for blob in viewkeys(blob_versions):
         if blob in blob_remap:
             continue
         elif blob in undef_blobs:
@@ -1200,12 +1308,14 @@ def _get_blob_ref(blob_name_or_ref):
 
 def _recover_record_by_prefix(names, prefix=''):
     """
-        Tries to recover record by taking a subset of blob names with
-        a given prefix name and interpreting them as schema column names
-        """
+    Tries to recover record by taking a subset of blob names with
+    a given prefix name and interpreting them as schema column names
+    """
     from caffe2.python import schema
     column_names = [name[len(prefix):] for name in names
                     if name.startswith(prefix)]
+    if not column_names:
+        return None
     return schema.from_column_list(
         column_names,
         col_blobs=[_get_blob_ref(prefix + name) for name in column_names])
@@ -1384,6 +1494,8 @@ class Net(object):
             return do_set(self.GivenTensorInt64Fill)
         elif array.dtype == np.str:
             return do_set(self.GivenTensorStringFill)
+        elif array.dtype == np.bool:
+            return do_set(self.GivenTensorBoolFill)
         else:
             return do_set(self.GivenTensorFill)
 
@@ -1408,6 +1520,20 @@ class Net(object):
                 if input == blob_name:
                     return True
         return blob_name in self._external_input_map
+
+    def UsedBlobNames(self):
+        """
+        Returns a set of blob names used in the net
+        """
+        blob_names = set()
+        for op in self._net.op:
+            blob_names |= set(op.input)
+            blob_names |= set(op.output)
+        if self._net.external_input:
+            blob_names |= set(self._net.external_input)
+        if self._net.external_output:
+            blob_names |= set(self._net.external_output)
+        return blob_names
 
     def GetBlobRef(self, blob_name):
         """
@@ -1436,8 +1562,12 @@ class Net(object):
             op_id_mask:  optional list of operator indices to include in
                          the cloned net. If not provided, all ops are included.
         """
-        if remap_funcs is None:
-            remap_funcs = {}
+        orig_remap_funcs = {} if remap_funcs is None else remap_funcs
+        # by default we want to put RecurrentNetworkOp and
+        # RecurrentNetworkGradientOp into remap_funcs, as these two operators
+        # also take blobs and proto into the arguments.
+        remap_funcs = DEFAULT_REMAP_FUNCS.copy()
+        remap_funcs.update(orig_remap_funcs)
         proto = self._net
         new_proto = caffe2_pb2.NetDef()
         new_proto.CopyFrom(proto)
@@ -1463,7 +1593,11 @@ class Net(object):
             remap_list(new_op.input)
             remap_list(new_op.output)
             if new_op.type in remap_funcs:
-                remap_funcs[new_op.type](new_op, (name + '/') if name else '')
+                remap_funcs[new_op.type](
+                    new_op,
+                    (name + '/') if name else '',
+                    blob_remap,
+                )
             return new_op
 
         del new_proto.op[:]
@@ -1524,10 +1658,11 @@ class Net(object):
             OrderedDict(zip(inputs, inputs)))
         for output in outputs:
             assert self.BlobIsDefined(output)
-        input_names = {str(k): str(v) for k, v in inputs.items()}
+        input_names = {str(k): str(v) for k, v in viewitems(inputs)}
         output_names = [str(o) for o in outputs]
         proto = self._net
-        ssa, blob_versions = get_ssa(proto)
+        blob_versions = {str(i): 0 for i in inputs}
+        ssa, blob_versions = get_ssa(proto, blob_versions)
         used_op_ids = get_op_ids_in_path(ssa, blob_versions, inputs, outputs)
         disallowed_op_ids = get_op_ids_in_path(ssa, blob_versions, [], inputs)
         assert len(set(used_op_ids) & set(disallowed_op_ids)) == 0, (
@@ -1535,7 +1670,7 @@ class Net(object):
             'generate the given input.')
 
         sub_ssa = [op for i, op in enumerate(ssa) if i in used_op_ids]
-        undef_blobs = get_undefined_blobs(sub_ssa) - set(input_names.keys())
+        undef_blobs = get_undefined_blobs(sub_ssa) - set(viewkeys(input_names))
         prefix = (name + '/') if name else ''
 
         def remap(blob_name):
@@ -1546,10 +1681,10 @@ class Net(object):
             else:
                 return prefix + blob_name
 
-        blob_mapping = {b: remap(b) for b in blob_versions.keys()}
+        blob_mapping = {b: remap(b) for b in viewkeys(blob_versions)}
         new_net = self.Clone(name, blob_mapping, used_op_ids, remap_funcs)
         new_in = [
-            blob_mapping[i] for i in input_names.keys()] + list(undef_blobs)
+            blob_mapping[i] for i in viewkeys(input_names)] + list(undef_blobs)
         new_out = [blob_mapping[o] for o in output_names]
         del new_net.Proto().external_input[:]
         new_net.Proto().external_input.extend(new_in)
@@ -1563,10 +1698,11 @@ class Net(object):
         return self._net
 
     def PopulateProtoWithFileName(self):
-        for op in self.Proto().op:
-            if op.uuid in workspace.operator_tracebacks:
-                tb = workspace.operator_tracebacks[op.uuid]
-                op.name = ':'.join(map(str, tb[-1][:2]))
+        net_tb = workspace.operator_tracebacks.get(self.Name(), None)
+        if net_tb is not None:
+            for idx, op in enumerate(self.Proto().op):
+                if idx in net_tb:
+                    op.name = ':'.join(map(str, net_tb[idx][0]))
 
     def NextScopedBlob(self, prefix='unnamed'):
         """Return the blob that has not been defined or registered in the
@@ -1615,7 +1751,7 @@ class Net(object):
     def _ExtendOps(self, new_ops):
         self._net.op.extend(new_ops)
         for op in new_ops:
-            self._op_outputs.update([str(o) for o in op.output])
+            self._op_outputs.update([text_type(o) for o in op.output])
 
     def _CheckLookupTables(self):
         '''
@@ -1707,7 +1843,7 @@ class Net(object):
 
     def AddScopedExternalInputs(self, *inputs):
         res = self.AddExternalInput(
-            * [ScopedBlobReference(str(b)) for b in inputs]
+            * [ScopedBlobReference(b) for b in inputs]
         )
         if not isinstance(res, list):
             res = [res]
@@ -1715,7 +1851,7 @@ class Net(object):
 
     def AddScopedExternalOutputs(self, *outputs):
         return self.AddExternalOutput(
-            * [ScopedBlobReference(str(b)) for b in outputs]
+            * [ScopedBlobReference(b) for b in outputs]
         )
 
     @property
@@ -1728,7 +1864,9 @@ class Net(object):
 
     def set_input_record(self, input_record):
         from caffe2.python import schema
-        assert self._input_record is None, (
+        assert self._input_record is None or (input_record.has_blobs() and
+            set(input_record.field_blobs()) ==
+            set(self._input_record.field_blobs())), (
             'Input schema cannot be reset')
         if not input_record.has_blobs():
             with NameScope(self.Name()):
@@ -1745,12 +1883,15 @@ class Net(object):
         Tries to recover input record by taking a subset of external_inputs with
         a given prefix name and interpreting them as schema column names
         """
-        self.set_input_record(_recover_record_by_prefix(
-            self._net.external_input, prefix))
+        record = _recover_record_by_prefix(self._net.external_input, prefix)
+        if record:
+            self.set_input_record(record)
 
     def set_output_record(self, record):
-        assert self._output_record is None, (
-            'Output record cannot be reset')
+        assert self._output_record is None or (record.has_blobs() and
+            set(record.field_blobs()) ==
+            set(self._output_record.field_blobs())), (
+            'Output schema cannot be reset')
         for blob in record.field_blobs():
             assert self.BlobIsDefined(blob), "{} is not defined".format(blob)
         for blob in record.field_blobs():
@@ -1762,8 +1903,9 @@ class Net(object):
         Tries to recover out record by taking a subset of external_outputs with
         a given prefix name and interpreting them as schema column names
         """
-        self.set_output_record(_recover_record_by_prefix(
-            self._net.external_output, prefix))
+        record = _recover_record_by_prefix(self._net.external_output, prefix)
+        if record:
+            self.set_output_record(record)
 
     def AppendOutputRecordField(self, field_name, record):
         from caffe2.python import schema
@@ -1811,7 +1953,7 @@ class Net(object):
             for op in self._net.op:
                 op.engine = "CUDNN"
     def RunAllOnMKL(self):
-        """A convenient function to run everything on the GPU."""
+        """A convenient function to run everything using MKLDNN."""
         device_option = caffe2_pb2.DeviceOption()
         device_option.device_type = caffe2_pb2.MKLDNN
         self._net.device_option.CopyFrom(device_option)
@@ -1837,12 +1979,16 @@ class Net(object):
         outputs = _RectifyInputOutput(outputs, net=self)
         op = CreateOperator(op_type, inputs, outputs, **kwargs)
         self._ExtendOps([op])
+
+        workspace.operator_tracebacks[self.Name()][
+            len(self._net.op) - 1] = _extract_stacktrace()
+
         if len(op.output) == 0:
             return
         elif len(op.output) == 1:
-            return BlobReference(str(op.output[0]), self)
+            return BlobReference(op.output[0], self)
         else:
-            return tuple(BlobReference(str(o), self) for o in op.output)
+            return tuple(BlobReference(o, self) for o in op.output)
 
     def __getattr__(self, op_type):
         if op_type.startswith('__'):
@@ -1861,10 +2007,11 @@ class Net(object):
             op
             for op in _REGISTERED_OPERATORS
             if '_ENGINE_' not in op]
-        return sorted(set(
-            dir(type(self)) +
-            self.__dict__.keys() +
-            additional_methods))
+        return sorted(set(chain(
+            dir(type(self)),
+            viewkeys(self.__dict__),
+            additional_methods
+        )))
 
     def Python(
         self,
@@ -1943,7 +2090,8 @@ class Net(object):
             grad_output_indices=grad_output_indices,
             grad_input_indices=grad_input_indices,
             *args,
-            **dict(kwargs.items() + core_kwargs.items()))
+            **dict(chain(viewitems(kwargs), viewitems(core_kwargs)))
+        )
 
     def is_external_input(self, blob):
         name = str(blob)
@@ -1966,7 +2114,7 @@ def copy_func_between_devices(src, dst):
         else:
             def fun(net, *args, **kw):
                 with DeviceScope(dst):
-                    return net.CopyGPUToGPU(*args, **kw)
+                    return net.Copy(*args, **kw)
             return fun
 
     if src.device_type == CUDA and dst.device_type == CPU:
@@ -1984,6 +2132,15 @@ def copy_func_between_devices(src, dst):
     raise ValueError('Non-supported devices: %s and %s' % (src, dst))
 
 
+def device_equal(src, dst):
+    '''
+    We are using this fucntion instead of == operator because optional-value
+    comparison between empty device_options and {device_type:0, cuda_gpu_id:0}
+    returns not equal in some cases.
+    '''
+    return src.device_type == dst.device_type and src.cuda_gpu_id == dst.cuda_gpu_id
+
+
 class RemapEntry:
     def __init__(self, blob, device):
         self.blob = blob
@@ -1996,7 +2153,7 @@ class RemapEntry:
         return hash(self.blob + str(self.device))
 
 
-def InjectCrossDeviceCopies(net, blob_to_device=None):
+def InjectCrossDeviceCopies(net, blob_to_device=None, blob_remap=None):
     '''
     Injecting Copy functions between device within a net. Users can provide
     a net with part of operators using different device_options. This method
@@ -2004,6 +2161,9 @@ def InjectCrossDeviceCopies(net, blob_to_device=None):
 
     Inputs:
       blob_to_device: If not None, it is a map of blobs and their device locations.
+      blob_remap: If not None, it is a map from a pair (blob, device) to
+                  the name of the blob in the given device. Blobs found in this
+                  map are assumed to be cached and don't need to be copied.
     Outputs:
       new_net: A new net with CopyCPUToGPU inserted with correct device option
 
@@ -2016,11 +2176,23 @@ def InjectCrossDeviceCopies(net, blob_to_device=None):
     '''
     new_net = net.Clone(net._net.name + '_cross_device', keep_schema=True)
     del new_net._net.op[:]
-    blob_to_device = blob_to_device or {}
+    if blob_to_device is None:
+        blob_to_device = {}
     # remapping of input blobs for each op.
-    blob_remap = {}
+    if blob_remap is None:
+        blob_remap = {}
     temp_remap = {}
     net_option = net._net.device_option or caffe2_pb2.DeviceOption()
+
+    # if external_inputs have device remappings generated by previous nets,
+    # then add those remappings as external inputs as well.
+    all_remaps = defaultdict(list)
+    for entry, mapped_blob in blob_remap.items():
+        all_remaps[entry.blob].append(mapped_blob)
+    mapped_external_inputs = []
+    for input in new_net._net.external_input:
+        mapped_external_inputs.extend(all_remaps.get(input) or [])
+    new_net._net.external_input.extend(mapped_external_inputs)
 
     for op in net._net.op:
         temp_remap.clear()
@@ -2039,7 +2211,7 @@ def InjectCrossDeviceCopies(net, blob_to_device=None):
                         format(input)
                     )
 
-            if not blob_to_device[input] == dev:
+            if not device_equal(blob_to_device[input], dev):
                 # reuse already moved input
                 if (RemapEntry(input, dev) in blob_remap and
                         blob_to_device[blob_remap[RemapEntry(input, dev)]] == dev):
@@ -2070,21 +2242,39 @@ def InjectCrossDeviceCopies(net, blob_to_device=None):
                     temp_remap[input] = new_name
                     blob_to_device[new_name] = dev
 
-        # Enforcing no in-place blob usage
-        for out_blob in op.output:
-            if out_blob in blob_to_device:
+        # Enforcing no reuse blob between operators. In-place blob usage in an
+        # op is allowed. This is based on the assumption that in-place op has
+        # same device info
+        for out_blob, device in zip(op.output, output_dev):
+            if out_blob in blob_to_device and (
+                out_blob not in op.input and
+                not device_equal(blob_to_device[out_blob], device)
+            ):
                 raise RuntimeError(
-                    "In-place blob: {} is not supported for inject device copy "
-                    "yet. Consider implementing it.".
-                    format(out_blob)
+                    "In-place blob: {} is not supported between operators "
+                    "with different device option previous:{} now: {}. "
+                    "Failed op:\n {}".format(
+                        out_blob, blob_to_device[out_blob], device, op
+                    )
                 )
-        blob_to_device.update({o: d for d, o in zip(output_dev, op.output)})
         new_op = caffe2_pb2.OperatorDef()
         new_op.CopyFrom(op)
 
         new_list = [temp_remap.get(b, b) for b in new_op.input]
         del new_op.input[:]
         new_op.input.extend(new_list)
+
+        # keep inplace blobs inplace
+        original_inputs = list(op.input)
+        for i, out in enumerate(new_op.output):
+            try:
+                input_idx = original_inputs.index(out)
+                new_op.output[i] = new_op.input[input_idx]
+            except ValueError:
+                pass
+
+        blob_to_device.update(
+            {o: d for d, o in zip(output_dev, new_op.output)})
         new_net.extend_ops([new_op])
 
     return new_net, blob_to_device
@@ -2110,11 +2300,14 @@ def InjectDeviceCopiesAmongNets(nets, blob_to_device_init=None):
         "nets {} should be a list of nets.".format(str(nets))
     # A holistic blob to device mapping.
     blob_to_device = blob_to_device_init or {}
+    blob_remap = {}
     new_nets = []
 
     for net in nets:
         new_net, blob_to_device = InjectCrossDeviceCopies(
-            net, blob_to_device=blob_to_device
+            net,
+            blob_to_device=blob_to_device,
+            blob_remap=blob_remap,
         )
         new_nets.append(new_net)
 
@@ -2220,7 +2413,7 @@ class ExecutionStep(object):
             len(self._step.substep) > 0)
 
     def Nets(self):
-        return self._net_dict.values()
+        return list(viewvalues(self._net_dict))
 
     def Substeps(self):
         return self._substeps
@@ -2228,6 +2421,14 @@ class ExecutionStep(object):
     def SetIter(self, num_iter):
         self._assert_can_mutate()
         self._step.num_iter = num_iter
+
+    def SetCreateWorkspace(self, create_workspace):
+        self._assert_can_mutate()
+        self._step.create_workspace = create_workspace
+
+    def SetNumConcurrentInstances(self, num_concurrent_instances):
+        self._assert_can_mutate()
+        self._step.num_concurrent_instances = num_concurrent_instances
 
     def SetOnlyOnce(self, only_once):
         self._assert_can_mutate()
@@ -2290,10 +2491,62 @@ class ExecutionStep(object):
         Return the list of all attributes under the given `name`, present in
         all of the nets used in this execution step and its children.
         """
-        objs = []
-        for net in self._net_dict.values():
-            objs += net.get_attributes(name)
-        return objs
+        return [
+            attr
+            for net in viewvalues(self._net_dict)
+            for attr in net.get_attributes(name)
+        ]
+
+    @classmethod
+    def create_from_proto(cls, step_proto, net_obj_dict, net_proto_dict):
+        """
+        Create ExecutionStep from ExecutionStep protobuf recursively
+        """
+        assert isinstance(step_proto, caffe2_pb2.ExecutionStep)
+        assert (len(step_proto.network) > 0 and len(step_proto.substep) == 0) or \
+            (len(step_proto.network) == 0 and len(step_proto.substep) > 0)
+
+        steps_or_nets = []
+        if len(step_proto.substep) > 0:
+            for substep_proto in step_proto.substep:
+                steps_or_nets.append(ExecutionStep.create_from_proto(
+                    substep_proto, net_obj_dict, net_proto_dict))
+        else:
+            for net_name in step_proto.network:
+                if net_name not in net_obj_dict:
+                    assert net_name in net_proto_dict
+                    net = Net(net_proto_dict[net_name])
+                    net_obj_dict[net_name] = net
+                net = net_obj_dict[net_name]
+                assert isinstance(net, Net)
+                steps_or_nets.append(net)
+
+        num_iter = step_proto.num_iter if step_proto.HasField('num_iter') else None
+        concurrent_substeps = step_proto.concurrent_substeps if\
+            step_proto.HasField('concurrent_substeps') else None
+        should_stop_blob = BlobReference(step_proto.should_stop_blob) if\
+            step_proto.HasField('should_stop_blob') else None
+        only_once = step_proto.only_once if\
+            step_proto.HasField('only_once') else None
+        num_concurrent_instances = step_proto.num_concurrent_instances if\
+            step_proto.HasField('num_concurrent_instances') else None
+        create_workspace = step_proto.create_workspace if\
+            step_proto.HasField('create_workspace') else None
+        run_every_ms = step_proto.run_every_ms if\
+            step_proto.HasField('run_every_ms') else None
+
+        return execution_step(
+            step_proto.name,
+            steps_or_nets,
+            num_iter=num_iter,
+            report_net=None,        # DEPRECATED
+            report_interval=None,   # DEPRECATED
+            concurrent_substeps=concurrent_substeps,
+            should_stop_blob=should_stop_blob,
+            only_once=only_once,
+            num_concurrent_instances=num_concurrent_instances,
+            create_workspace=create_workspace,
+            run_every_ms=run_every_ms)
 
 
 def add_nets_in_order(step, net_list):
@@ -2315,6 +2568,7 @@ class Plan(object):
     def __init__(self, name_or_step):
         self._plan = caffe2_pb2.PlanDef()
         self._net_dict = OrderedDict()
+        self._steps = []    # A list of ExecutionStep
         if isinstance(name_or_step, ExecutionStep):
             self._plan.name = name_or_step.Name()
             self.AddStep(name_or_step)
@@ -2336,7 +2590,7 @@ class Plan(object):
                 self._plan.network.add().CopyFrom(net.Proto())
 
     def Nets(self):
-        return self._net_dict.values()
+        return list(viewvalues(self._net_dict))
 
     def AddStep(self, step):
         assert isinstance(step, ExecutionStep)
@@ -2344,20 +2598,44 @@ class Plan(object):
         if not step.HasNets() and not step.HasSubsteps():
             return
         self._plan.execution_step.add().CopyFrom(step.Proto())
+        self._steps.append(step)
         # nets need to be added to the plan in order of usage
         net_list = []
         add_nets_in_order(step, net_list)
         self.AddNets([step.get_net(n) for n in net_list])
+
+    def Steps(self):
+        return self._steps
 
     def get_all_attributes(self, name):
         """
         Return the list of all attributes under the given `name`, present in
         all of the nets used in this plan.
         """
-        objs = []
-        for net in self._net_dict.values():
-            objs += net.get_attributes(name)
-        return objs
+        return [
+            attr
+            for net in viewvalues(self._net_dict)
+            for attr in net.get_attributes(name)
+        ]
+
+    @classmethod
+    def create_from_proto(cls, plan_proto):
+        assert isinstance(plan_proto, caffe2_pb2.PlanDef)
+        plan = Plan(plan_proto.name)
+        plan._plan.CopyFrom(plan_proto)
+
+        net_obj_dict = {}
+        net_proto_dict = {}
+        for net_proto in plan_proto.network:
+            assert net_proto.name not in net_proto_dict
+            net_proto_dict[net_proto.name] = net_proto
+
+        for step_proto in plan_proto.execution_step:
+            step = ExecutionStep.create_from_proto(
+                step_proto, net_obj_dict, net_proto_dict)
+            plan.AddStep(step)
+
+        return plan
 
 
 def to_execution_step(step_or_nets, default_name=None):
@@ -2382,7 +2660,10 @@ def execution_step(default_name,
                    report_interval=None,
                    concurrent_substeps=None,
                    should_stop_blob=None,
-                   only_once=None):
+                   only_once=None,
+                   num_concurrent_instances=None,
+                   create_workspace=False,
+                   run_every_ms=None):
     """
     Helper for creating an ExecutionStep.
     - steps_or_nets can be:
@@ -2414,6 +2695,12 @@ def execution_step(default_name,
     if report_net is not None:
         assert report_interval is not None
         step.SetReportNet(report_net, report_interval)
+    if num_concurrent_instances is not None:
+        step.SetNumConcurrentInstances(num_concurrent_instances)
+    if create_workspace:
+        step.SetCreateWorkspace(True)
+    if run_every_ms:
+        step.RunEveryMillis(run_every_ms)
 
     if isinstance(steps_or_nets, ExecutionStep):
         step.AddSubstep(steps_or_nets)
@@ -2436,3 +2723,37 @@ def scoped_execution_step(name, *args, **kwargs):
     """Same as execution_step() except that the step name is scoped."""
     default_name = ScopedName(name) if name else name
     return execution_step(default_name, *args, **kwargs)
+
+
+def _extract_stacktrace():
+    '''
+    This function extracts stacktrace without file system access
+    by purely using sys._getframe() and removes part that belongs to
+    this file (core.py). We are not using inspect module because
+    its just a wrapper on top of sys._getframe() whos
+    logis is based on accessing source files on disk - exactly what
+    we are trying to avoid here. Same stands for traceback module
+
+    The reason for file system access avoidance is that
+    if code is located on an NFS, file access might be slow
+
+    Function returns a list of tuples (file_name, line_number)
+    '''
+
+    current_file_name = __name__.replace('.', '/') + ".py"
+    result = []
+    frame = sys._getframe(1)
+    # We just go down the frame stack in a loop
+    while frame:
+        if current_file_name not in frame.f_code.co_filename:
+            # Its important to extract information from the frame here
+            # as frame's current line most probably will change later.
+            result.append((frame.f_code.co_filename, frame.f_lineno))
+        frame = frame.f_back
+    return result
+
+
+SetPerOpEnginePref = C.set_per_op_engine_pref
+SetGlobalEnginePref = C.set_global_engine_pref
+SetEnginePref = C.set_engine_pref
+SetOpEnginePref = C.set_op_engine_pref

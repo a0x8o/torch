@@ -85,14 +85,6 @@ def AddNogradient(op, g_output):
 
 
 class TestGradientCalculation(test_util.TestCase):
-    def assertEqual(self, op_list1, op_list2):
-        if isinstance(op_list1, list) and isinstance(op_list2, list):
-            for op in op_list1 + op_list2:
-                if isinstance(op, caffe2_pb2.OperatorDef):
-                    op.ClearField(bytes_to_native_str(b'uuid'))
-        return super(TestGradientCalculation, self).assertEqual(
-            op_list1, op_list2)
-
     @given(device_option=st.sampled_from([
         None,
         core.DeviceOption(caffe2_pb2.CUDA, 1)]))
@@ -164,6 +156,21 @@ class TestGradientCalculation(test_util.TestCase):
         gradients, _ = GradientRegistry.GetBackwardPass(
             operators, {'out': 'out_grad'})
         self.assertEqual(gradients, desired_grad_operators)
+
+    def testVersionMismatch(self):
+        operators = [
+            CreateOperator('Direct', 'x', 'x'),
+            CreateOperator('Direct', 'y', 'x'),
+            CreateOperator('Direct', 'x', 'y'),
+        ]
+        try:
+            gradients, _ = GradientRegistry.GetBackwardPass(
+                operators, {'y': 'y_grad'})
+            self.assertFalse(True, "Should raise exception of incorrect version")
+        except RuntimeError as e:
+            print(e)
+            self.assertTrue("version" in str(e))
+            pass
 
     def testUseOutput(self):
         operators = [
@@ -485,6 +492,17 @@ class TestGradientCalculation(test_util.TestCase):
         gradients, _ = GradientRegistry.GetBackwardPass(
             operators, {'out': 'out_grad'})
         self.assertEqual(gradients, desired_grad_operators)
+
+    def testStopGradientOrphan(self):
+        operators = [
+            CreateOperator('Direct', 'in', 'hidden'),
+            CreateOperator('StopGradient', 'hidden', 'auto_blobx'),
+            CreateOperator('Direct', 'hidden', 'out'),
+        ]
+        with self.assertRaises(ValueError):
+            # This should complain about incorrect use of StopGradient
+            gradients, _ = GradientRegistry.GetBackwardPass(
+                operators, {'out': 'out_grad'})
 
     def testStopGradientInplace(self):
         operators = [

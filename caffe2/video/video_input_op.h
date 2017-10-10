@@ -103,7 +103,9 @@ VideoInputOp<Context>::VideoInputOp(
           OperatorBase::template GetSingleArgument<int>("num_of_labels", 0)),
       use_local_file_(
           OperatorBase::template GetSingleArgument<int>("use_local_file", 0)),
-      is_test_(OperatorBase::template GetSingleArgument<int>("is_test", 0)),
+      is_test_(OperatorBase::template GetSingleArgument<int>(
+          OpSchema::Arg_IsTest,
+          0)),
       im_extension_(
           OperatorBase::template GetSingleArgument<string>("im_extension", "")),
       num_decode_threads_(
@@ -297,22 +299,24 @@ void VideoInputOp<Context>::DecodeAndTransform(
   // Decode the video from memory or read from a local file
   CHECK(GetClipAndLabelFromDBValue(value, buffer, label_data, randgen));
 
-  ClipTransform(
-      buffer,
-      3,
-      length_,
-      scale_h_,
-      scale_w_,
-      crop_size,
-      mirror,
-      mean,
-      std,
-      clip_data,
-      randgen,
-      mirror_this_clip,
-      is_test_);
+  if (buffer) {
+    ClipTransform(
+        buffer,
+        3,
+        length_,
+        scale_h_,
+        scale_w_,
+        crop_size,
+        mirror,
+        mean,
+        std,
+        clip_data,
+        randgen,
+        mirror_this_clip,
+        is_test_);
 
-  delete[] buffer;
+    delete[] buffer;
+  }
 }
 
 template <class Context>

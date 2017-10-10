@@ -4,7 +4,9 @@ from __future__ import print_function
 
 import numpy as np
 import copy
+import time
 from functools import partial, reduce
+from future.utils import viewitems, viewkeys
 from hypothesis import assume, given, settings
 import hypothesis.strategies as st
 import unittest
@@ -26,6 +28,7 @@ def _tensor_and_prefix(draw, dtype, elements, min_dim=1, max_dim=4, **kwargs):
         st.lists(hu.dims(**kwargs), min_size=min_dim, max_size=max_dim))
     extra_ = draw(
         st.lists(hu.dims(**kwargs), min_size=min_dim, max_size=max_dim))
+    assume(len(dims_) + len(extra_) < max_dim)
     return (draw(hu.arrays(dims_ + extra_, dtype, elements)),
             draw(hu.arrays(extra_, dtype, elements)))
 
@@ -115,7 +118,7 @@ class TestOperators(hu.HypothesisTestCase):
                "LE": lambda x1, x2: [x1 <= x2],
                "GT": lambda x1, x2: [x1 > x2],
                "GE": lambda x1, x2: [x1 >= x2]}
-        for name, ref in ops.items():
+        for name, ref in viewitems(ops):
             _test_binary(name, ref, gcs=hu.gcs_cpu_only)(self)
             _test_binary_broadcast(name, ref, gcs=hu.gcs_cpu_only)(self)
 
@@ -310,7 +313,7 @@ class TestOperators(hu.HypothesisTestCase):
                      "Skipping test due to no gpu present.")
     @given(hidden_size=st.integers(min_value=1, max_value=3),
            num_layers=st.integers(min_value=1, max_value=3),
-           bidirectional=st.booleans(),
+           bidirectional=st.just(False),  # TODO
            rnn_mode=st.sampled_from(["lstm"]),   # TODO: "gru"
            input_mode=st.sampled_from(["linear"]),
            dropout=st.floats(min_value=1.0, max_value=1.0),
@@ -325,12 +328,17 @@ class TestOperators(hu.HypothesisTestCase):
         np.random.seed(seed)
 
         input_weight_size = hidden_size * D
+        upper_layer_input_weight_size = hidden_size * hidden_size
         recurrent_weight_size = hidden_size * hidden_size
         input_bias_size = hidden_size
         recurrent_bias_size = hidden_size
         num_directions = 2 if bidirectional else 1
-        total_sz = 4 * (input_weight_size + recurrent_weight_size +
-                        input_bias_size + recurrent_bias_size) * num_layers
+        first_layer_sz = input_weight_size + recurrent_weight_size + \
+                         input_bias_size + recurrent_bias_size
+        upper_layer_sz = upper_layer_input_weight_size + \
+                         recurrent_weight_size + input_bias_size + \
+                         recurrent_bias_size
+        total_sz = 4 * (first_layer_sz + (num_layers - 1) * upper_layer_sz)
         total_sz *= num_directions
 
         W = np.random.rand(total_sz).astype(np.float32)
@@ -365,26 +373,40 @@ class TestOperators(hu.HypothesisTestCase):
 
         for input_idx in input_idxs:
             self.assertGradientChecks(
-                hu.gpu_do, op, inputs, input_idx, [0])
+                hu.gpu_do, op, inputs, input_idx, [0],
+                stepsize=0.01, threshold=0.01)
 
     @given(ndim=st.integers(1, 4),
            axis=st.integers(0, 3),
+           add_axis=st.integers(0, 1),
            num_inputs=st.integers(2, 4), **hu.gcs)
-    def test_depth_concat(self, ndim, axis, num_inputs, gc, dc):
+    def test_depth_concat(self, ndim, axis, add_axis, num_inputs, gc, dc):
         assume(axis < ndim)
         input_names = ['X0', 'X1', 'X2', 'X3'][:num_inputs]
         shape = [2, 3, 5, 7][:ndim]
         individual_dims = [1, 2, 3, 4, 5][:num_inputs]
         inputs = []
         for i in range(num_inputs):
-            # Sets a unique dim and create the input.
-            shape[axis] = individual_dims[i]
+            if add_axis == 0:
+                # Sets a unique dim and create the input.
+                shape[axis] = individual_dims[i]
             inputs.append(np.random.randn(*shape).astype(np.float32))
         op = core.CreateOperator("Concat", input_names, ["Y", "Y_dims"],
-                                 axis=axis)
+                                 axis=axis, add_axis=add_axis)
         self.assertDeviceChecks(dc, op, inputs, [0])
         for i in range(num_inputs):
             self.assertGradientChecks(gc, op, inputs, i, [0])
+
+        # Reference
+        def depth_concat(*inputs):
+            inputs = list(inputs)
+            if add_axis:
+                for i in range(len(inputs)):
+                    inputs[i] = np.expand_dims(inputs[i], axis)
+            input_dims = np.array([np.shape(x)[axis] for x in inputs])
+            return [np.concatenate(inputs, axis=axis), input_dims]
+
+        self.assertReferenceChecks(gc, op, inputs, depth_concat)
 
     @given(num_inputs=st.integers(2, 4),
            order=st.sampled_from([("NCHW", 1), ("NHWC", 3)]),
@@ -403,6 +425,15 @@ class TestOperators(hu.HypothesisTestCase):
         self.assertDeviceChecks(dc, op, inputs, [0])
         for i in range(num_inputs):
             self.assertGradientChecks(gc, op, inputs, i, [0])
+
+        # Reference
+        def depth_concat_with_order(*inputs):
+            inputs = list(inputs)
+            axis = order[1]
+            input_dims = np.array([np.shape(x)[axis] for x in inputs])
+            return [np.concatenate(inputs, axis=axis), input_dims]
+
+        self.assertReferenceChecks(gc, op, inputs, depth_concat_with_order)
 
     @given(X=hu.arrays(dims=[5, 2],
                        elements=st.floats(min_value=0.0, max_value=10.0)),
@@ -428,105 +459,6 @@ class TestOperators(hu.HypothesisTestCase):
             new_output[i % 7] = inputs[i % inputs.shape[0]]
         import numpy.testing as npt
         npt.assert_almost_equal(output, new_output, decimal=5)
-
-    @given(batch_size=st.integers(1, 3),
-           stride=st.integers(1, 3),
-           pad=st.integers(0, 3),
-           kernel=st.integers(1, 5),
-           dilation=st.integers(1, 3),
-           size=st.integers(7, 10),
-           channels=st.integers(1, 8),
-           **hu.gcs)
-    def test_im2col_layout(self, batch_size, stride, pad, kernel, dilation,
-                           size, channels, gc, dc):
-
-        dkernel = (dilation * (kernel - 1) + 1)
-        assume(size >= dkernel)
-
-        NCHW_TO_NHWC = (0, 2, 3, 1)
-        NHWC_TO_NCHW = (0, 3, 1, 2)
-        COL_NHWC_TO_NCHW = (4, 2, 3, 0, 1)
-
-        N = batch_size
-        C = channels
-        H = size
-        W = size
-
-        out_h = int((H + (2 * pad) - dkernel) / stride + 1)
-        out_w = int((W + (2 * pad) - dkernel) / stride + 1)
-
-        im_nchw = np.random.rand(N, C, H, W).astype(np.float32) - 0.5
-        im_nhwc = im_nchw.transpose(NCHW_TO_NHWC)
-
-        op_im2col_nchw = core.CreateOperator(
-            "Im2Col",
-            ["im_nchw"], ["col_nchw"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NCHW",
-            device_option=gc)
-
-        op_im2col_nhwc = core.CreateOperator(
-            "Im2Col",
-            ["im_nhwc"], ["col_nhwc"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NHWC",
-            device_option=gc)
-
-        self.ws.create_blob("im_nchw").feed(im_nchw, device_option=gc)
-        self.ws.create_blob("im_nhwc").feed(im_nhwc, device_option=gc)
-        self.ws.run(op_im2col_nchw)
-        self.ws.run(op_im2col_nhwc)
-
-        # there is probably a clever way to spell this in np
-        col_nchw = self.ws.blobs["col_nchw"].fetch()
-        col_nhwc = self.ws.blobs["col_nhwc"].fetch()
-        col_nchw_ = col_nchw.reshape(N, C, kernel, kernel, out_h, out_w)
-        col_nhwc_ = col_nhwc.reshape(N, out_h, out_w, kernel, kernel, C)
-        for i in range(0, N):
-            np.testing.assert_allclose(
-                col_nchw_[i],
-                col_nhwc_[i].transpose(COL_NHWC_TO_NCHW),
-                atol=1e-4,
-                rtol=1e-4)
-
-        op_col2im_nchw = core.CreateOperator(
-            "Col2Im",
-            ["col_nchw", "im_nchw"],
-            ["out_nchw"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NCHW",
-            device_option=gc)
-
-        op_col2im_nhwc = core.CreateOperator(
-            "Col2Im",
-            ["col_nhwc", "im_nhwc"],
-            ["out_nhwc"],
-            stride=stride,
-            kernel=kernel,
-            dilation=dilation,
-            pad=pad,
-            order="NHWC",
-            device_option=gc)
-
-        self.ws.run(op_col2im_nchw)
-        self.ws.run(op_col2im_nhwc)
-
-        out_nchw = self.ws.blobs["out_nchw"].fetch()
-        out_nhwc = self.ws.blobs["out_nhwc"].fetch()
-        np.testing.assert_allclose(
-            out_nchw,
-            out_nhwc.transpose(NHWC_TO_NCHW),
-            atol=1e-4,
-            rtol=1e-4)
 
     @given(dtype=st.sampled_from([np.float32, np.float64, np.int32, np.bool]))
     def test_print(self, dtype):
@@ -805,10 +737,11 @@ class TestOperators(hu.HypothesisTestCase):
             N = prediction.shape[0]
             correct = 0
             for i in range(0, len(prediction)):
-                # we no longer have cmp function in python 3
-                pred_sorted = sorted([
-                    [item, j] for j, item in enumerate(prediction[i])],
-                    cmp=lambda x, y: int(y[0] > x[0]) - int(y[0] < x[0]))
+                pred_sorted = sorted(
+                    ([item, j] for j, item in enumerate(prediction[i])),
+                    key=lambda x: x[0],
+                    reverse=True
+                )
                 max_ids = [x[1] for x in pred_sorted[0:top_k]]
                 for m in max_ids:
                     if m == labels[i]:
@@ -882,7 +815,7 @@ class TestOperators(hu.HypothesisTestCase):
         def op_ref(lengths):
             sids = []
             for _, l in enumerate(lengths):
-                sids.extend(range(l))
+                sids.extend(list(range(l)))
             return (np.array(sids, dtype=np.int32), )
 
         self.assertReferenceChecks(
@@ -1062,6 +995,66 @@ class TestOperators(hu.HypothesisTestCase):
         dims=[10], elements=st.floats(allow_nan=False,
                                       allow_infinity=False)),
            **hu.gcs)
+    def test_abs(self, input_tensor, gc, dc):
+        op = core.CreateOperator(
+            "Abs",
+            ["input"],
+            ["output"]
+        )
+
+        def abs_ref(input_tensor):
+            return (np.abs(input_tensor),)
+
+        self.assertReferenceChecks(
+            device_option=gc,
+            op=op,
+            inputs=[input_tensor],
+            reference=abs_ref)
+
+    @given(input_tensor=hu.arrays(
+        dims=[10], elements=st.floats(min_value=-10,
+                                      max_value=10)),
+           **hu.gcs)
+    def test_cos(self, input_tensor, gc, dc):
+        op = core.CreateOperator(
+            "Cos",
+            ["input"],
+            ["output"]
+        )
+
+        def cos_ref(input_tensor):
+            return (np.cos(input_tensor),)
+
+        self.assertReferenceChecks(
+            device_option=gc,
+            op=op,
+            inputs=[input_tensor],
+            reference=cos_ref)
+
+    @given(input_tensor=hu.arrays(
+        dims=[10], elements=st.floats(min_value=-10,
+                                      max_value=10)),
+           **hu.gcs)
+    def test_sin(self, input_tensor, gc, dc):
+        op = core.CreateOperator(
+            "Sin",
+            ["input"],
+            ["output"]
+        )
+
+        def sin_ref(input_tensor):
+            return (np.sin(input_tensor),)
+
+        self.assertReferenceChecks(
+            device_option=gc,
+            op=op,
+            inputs=[input_tensor],
+            reference=sin_ref)
+
+    @given(input_tensor=hu.arrays(
+        dims=[10], elements=st.floats(allow_nan=False,
+                                      allow_infinity=False)),
+           **hu.gcs)
     def test_exp(self, input_tensor, gc, dc):
         op = core.CreateOperator(
             "Exp",
@@ -1099,6 +1092,24 @@ class TestOperators(hu.HypothesisTestCase):
             reference=log_ref)
         self.assertGradientChecks(gc, op, [input_tensor], 0, [0])
 
+    def test_blobs_dequeue_timeout(self):
+        op = core.CreateOperator(
+            "CreateBlobsQueue",
+            [],
+            ["queue"],
+            capacity=5,
+            num_blobs=1)
+        self.ws.run(op)
+        t = time.time()
+        op = core.CreateOperator(
+            "DequeueBlobs",
+            ["queue"],
+            ["out"],
+            timeout_secs=0.2)
+        self.assertRaises(RuntimeError, lambda: self.ws.run(op))
+        t = time.time() - t
+        self.assertGreater(t, 0.19)
+
     @given(num_threads=st.integers(1, 10),  # noqa
            num_elements=st.integers(1, 100),
            capacity=st.integers(1, 5),
@@ -1115,7 +1126,11 @@ class TestOperators(hu.HypothesisTestCase):
           original matrices.
         """
         import threading
-        import Queue
+        try:
+            import queue
+        except ImportError:
+            # Py3
+            import Queue as queue
         op = core.CreateOperator(
             "CreateBlobsQueue",
             [],
@@ -1127,7 +1142,7 @@ class TestOperators(hu.HypothesisTestCase):
 
         xs = [np.random.randn(num_elements, 5).astype(np.float32)
               for _ in range(num_blobs)]
-        q = Queue.Queue()
+        q = queue.Queue()
         for i in range(num_elements):
             q.put([x[i] for x in xs])
 
@@ -1145,7 +1160,7 @@ class TestOperators(hu.HypothesisTestCase):
                         self.ws.create_blob(feed_blob).feed(
                             elem, device_option=do)
                     self.ws.run(op)
-                except Queue.Empty:
+                except queue.Empty:
                     return
 
         # Create all blobs before racing on multiple threads
@@ -1672,8 +1687,8 @@ class TestOperators(hu.HypothesisTestCase):
         self.assertEqual(iters[0], initial_iters + num_iters * num_nets)
 
     @given(a=hu.tensor(),
-           src=st.sampled_from(_NUMPY_TYPE_TO_ENUM.keys()),
-           dst=st.sampled_from(_NUMPY_TYPE_TO_ENUM.keys()),
+           src=st.sampled_from(list(viewkeys(_NUMPY_TYPE_TO_ENUM))),
+           dst=st.sampled_from(list(viewkeys(_NUMPY_TYPE_TO_ENUM))),
            use_name=st.booleans(),
            **hu.gcs)
     def test_cast(self, a, src, dst, use_name, gc, dc):
@@ -1699,15 +1714,28 @@ class TestOperators(hu.HypothesisTestCase):
 
     @given(a=hu.tensor(),
            eps=st.floats(min_value=1e-4, max_value=1e-2),
+           a_grad=hu.tensor(elements=st.floats(min_value=0.01, max_value=0.99)),
+           eps_grad=st.floats(min_value=1e-4, max_value=1e-3),
            **hu.gcs_cpu_only)
-    def test_logit(self, a, eps, gc, dc):
+    def test_logit(self, a, eps, a_grad, eps_grad, gc, dc):
         def ref(data):
             data = np.clip(data, eps, 1.0 - eps)
             return (np.log(data / (1 - data)), )
-
+        # forward testing carried out in the full range of input
+        # to ensure original test coverage.
+        # gradient test carried out with reduced input range
+        # because the sharp increase of the logit curve at 0 and 1
+        # error increases dramtically when input is close to 0 or 1
+        # and it will fail the test.
+        # So we only run gradient test in the range of (0.01, 0.99)
+        # very occationally, test may fail due to random accumulated error
+        # reduce test range to (0.02, 0.98) will improve test stability
         op = core.CreateOperator('Logit', ["X"], ["Y"], eps=eps)
         self.assertDeviceChecks(dc, op, [a], [0])
         self.assertReferenceChecks(gc, op, [a], ref)
+        op_grad = core.CreateOperator('Logit', ["X"], ["Y"], eps=eps_grad)
+        self.assertGradientChecks(gc, op_grad, [a_grad], 0, [0],
+                                  threshold=0.04, stepsize=2e-3)
 
     @given(a=hu.tensor(elements=st.floats(allow_nan=True)),
            value=st.floats(min_value=-10, max_value=10),
@@ -1792,8 +1820,9 @@ class TestOperators(hu.HypothesisTestCase):
 
         backward_ops, backward_mapping = core.GradientRegistry.GetBackwardPass(
             step_net.Proto().op, {"hidden_t": "hidden_t_grad"})
-        backward_mapping = {str(k): str(v) for k, v
-                            in backward_mapping.items()}
+        backward_mapping = {
+            str(k): str(v) for k, v in viewitems(backward_mapping)
+        }
         backward_step_net = core.Net("ElmanBackward")
         del backward_step_net.Proto().op[:]
         backward_step_net.Proto().op.extend(backward_ops)
@@ -1826,14 +1855,16 @@ class TestOperators(hu.HypothesisTestCase):
             alias_dst=["output", "hidden_output"],
             alias_offset=[1, -1],
             recurrent_states=["hidden"],
-            initial_recurrent_state_ids=map(inputs.index, recurrent_inputs),
+            initial_recurrent_state_ids=[
+                inputs.index(i) for i in recurrent_inputs
+            ],
             link_internal=link_internal,
             link_external=link_external,
             link_offset=link_offset,
             backward_link_internal=backward_link_internal,
             backward_link_external=backward_link_external,
             backward_link_offset=backward_link_offset,
-            param=map(inputs.index, step_net.params),
+            param=[inputs.index(p) for p in step_net.params],
             step_net=str(step_net.Proto()),
             backward_step_net=str(backward_step_net.Proto()),
             outputs_with_grads=[0],
@@ -1937,49 +1968,6 @@ class TestOperators(hu.HypothesisTestCase):
         self.ws.create_blob("b").deserialize(serialized)
         self.assertEqual(s, self.ws.blobs[("a")].fetch())
         self.assertEqual(s, self.ws.blobs[("b")].fetch())
-
-    @given(n=st.integers(1, 3),
-           dim=st.integers(4, 16),
-           **hu.gcs)
-    def test_distances(self, n, dim, gc, dc):
-        X = np.random.uniform(-1, 1, (n, dim)).astype(np.float32)
-        Y = np.random.uniform(-1, 1, (n, dim)).astype(np.float32)
-        self.ws.create_blob("X").feed(X)
-        self.ws.create_blob("Y").feed(Y)
-
-        def check_grad(op):
-            self.assertGradientChecks(gc, op, [X, Y], 0, [0],
-                                      stepsize=1e-2, threshold=1e-2)
-            self.assertGradientChecks(gc, op, [X, Y], 1, [0],
-                                      stepsize=1e-2, threshold=1e-2)
-
-        l2_op = core.CreateOperator("SquaredL2Distance",
-                                    ["X", "Y"], ["l2_dist"])
-        self.ws.run(l2_op)
-        np.testing.assert_allclose(self.ws.blobs[("l2_dist")].fetch(),
-                                   np.square(X - Y).sum(axis=1) * 0.5,
-                                   rtol=1e-4, atol=1e-4)
-        check_grad(l2_op)
-        if gc.device_type == 1:
-            # Only SquaredL2Distance has CUDA implementation
-            return
-
-        dot_op = core.CreateOperator("DotProduct", ["X", "Y"], ["dot"])
-        self.ws.run(dot_op)
-        np.testing.assert_allclose(self.ws.blobs[("dot")].fetch(),
-                                   np.multiply(X, Y).sum(axis=1),
-                                   rtol=1e-4, atol=1e-4)
-        check_grad(dot_op)
-
-        kEps = 1e-12
-        cos_op = core.CreateOperator("CosineSimilarity", ["X", "Y"], ["cos"])
-        self.ws.run(cos_op)
-        cos = np.divide(np.multiply(X, Y).sum(axis=1),
-                        np.multiply(np.linalg.norm(X, axis=1) + kEps,
-                                    np.linalg.norm(Y, axis=1) + kEps))
-        np.testing.assert_allclose(self.ws.blobs[("cos")].fetch(), cos,
-                                   rtol=1e-4, atol=1e-4)
-        check_grad(cos_op)
 
     @given(pad=st.integers(0, 3),
            size=st.integers(1, 10),
@@ -2152,12 +2140,20 @@ class TestOperators(hu.HypothesisTestCase):
         self.assertReferenceChecks(gc, op, Xs, unsafe_coalesce)
 
     @given(inp=_dtypes().flatmap(lambda dt: _tensor_and_indices(
-        elements=st.floats(min_value=0.5, max_value=10), dtype=dt)),
-        **hu.gcs_cpu_only)
+        elements=st.floats(min_value=0, max_value=1), dtype=dt)),
+        **hu.gcs)
     def test_sparse_to_dense(self, inp, gc, dc):
         first_dim, X, I = inp
+        if X.dtype != np.dtype('float32') and gc.device_type == 1:
+            # Cuda only support 32 bit float
+            print("Bailout {}".format(X.dtype))
+            return
+        if gc.device_type == 1:
+            # Cuda version only support int32
+            I = I.astype(np.int32)
+
         # values don't matter
-        D = np.random.uniform(0, 1, size=(first_dim,) + X.shape[1:])
+        D = np.zeros((first_dim,) + X.shape[1:]).astype(X.dtype)
 
         op = core.CreateOperator("SparseToDense", ["I", "X", "D"], ["Y"])
 
@@ -2168,8 +2164,6 @@ class TestOperators(hu.HypothesisTestCase):
             return [O]
 
         self.assertReferenceChecks(gc, op, [I, X, D], sparse_to_dense)
-        self.assertDeviceChecks(dc, op, [I, X, D], [0])
-
         X = X.astype(np.float32)
         self.assertGradientChecks(gc, op, [I, X, D], 1, [0])
 

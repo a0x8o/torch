@@ -71,13 +71,14 @@ def instance_norm(model, blob_in, blob_out, dim_in, order="NCHW", **kwargs):
         return blob_outputs[0]
 
 
-def spatial_bn(model, blob_in, blob_out, dim_in, order="NCHW", **kwargs):
+def spatial_bn(model, blob_in, blob_out, dim_in,
+               init_scale=1., init_bias=0., order="NCHW", **kwargs):
     blob_out = blob_out or model.net.NextName()
     # Input: input, scale, bias, est_mean, est_inv_var
     # Output: output, running_mean, running_inv_var, saved_mean,
     #         saved_inv_var
-    # scale: initialize with ones
-    # bias: initialize with zeros
+    # scale: initialize with init_scale (default 1.)
+    # bias: initialize with init_bias (default 0.)
     # est mean: zero
     # est var: ones
 
@@ -86,7 +87,7 @@ def spatial_bn(model, blob_in, blob_out, dim_in, order="NCHW", **kwargs):
             [], blob_out + "_" + suffix, shape=[dim_in], value=value)
 
     if model.init_params:
-        scale, bias = init_blob(1.0, "s"), init_blob(0.0, "b")
+        scale, bias = init_blob(init_scale, "s"), init_blob(init_bias, "b")
         running_mean = init_blob(0.0, "rm")
         running_inv_var = init_blob(1.0, "riv")
     else:
@@ -117,3 +118,34 @@ def spatial_bn(model, blob_in, blob_out, dim_in, order="NCHW", **kwargs):
             order=order, **kwargs)
         # Return the output
         return blob_outputs[0]
+
+
+def layer_norm(model, blob_in, blob_out, **kwargs):
+    def init_scalar_blob(value, suffix):
+        return model.param_init_net.ConstantFill(
+            [], blob_out + "_" + suffix, shape=[1], value=value)
+
+    scale, bias = init_scalar_blob(1.0, "s"), init_scalar_blob(0.0, "b")
+
+    model.AddParameter(scale, ParameterTags.WEIGHT)
+    model.AddParameter(bias, ParameterTags.BIAS)
+
+    normalized, mean, stdev = model.net.LayerNorm(
+        [blob_in],
+        [blob_out, blob_out + "_mean", blob_out + "_stdev"],
+        **kwargs
+    )
+
+    weighted = model.net.Mul(
+        [normalized, scale],
+        [blob_out + "_weighted"],
+        broadcast=1,
+    )
+
+    biased = model.net.Mul(
+        [weighted, bias],
+        [blob_out + "_biased"],
+        broadcast=1,
+    )
+
+    return biased, mean, stdev

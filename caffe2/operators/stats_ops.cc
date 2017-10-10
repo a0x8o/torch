@@ -5,7 +5,6 @@
 #include "caffe2/core/tensor.h"
 
 namespace caffe2 {
-namespace {
 
 class StatRegistryCreateOp : public Operator<CPUContext> {
  public:
@@ -120,10 +119,11 @@ class TimerInstance {
 
 struct TimerBeginOp : public Operator<CPUContext> {
   TimerBeginOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator(operator_def, ws), timer_([this]() {
-          auto givenName = GetSingleArgument<std::string>("counter_name", "");
-          return givenName.empty() ? def().output().Get(0) : givenName;
-        }()) {}
+      : Operator(operator_def, ws),
+        given_name_(GetSingleArgument<std::string>(
+            "counter_name",
+            operator_def.output().Get(0))),
+        timer_([this]() { return given_name_; }()) {}
 
   bool RunOnDevice() override {
     *OperatorBase::Output<TimerInstance*>(0) = &timer_;
@@ -132,6 +132,7 @@ struct TimerBeginOp : public Operator<CPUContext> {
   }
 
  private:
+  const std::string given_name_;
   TimerInstance timer_;
 };
 
@@ -159,6 +160,28 @@ struct TimerGetAndEndOp : public Operator<CPUContext> {
   }
 };
 
+struct CpuUtilizationReportOp : public Operator<CPUContext> {
+  CpuUtilizationReportOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator(operator_def, ws),
+        statsName_(GetSingleArgument<std::string>("stats_name", "utilization")),
+        stat_([this]() { return statsName_; }()) {}
+
+  bool RunOnDevice() override {
+    float utilization = Input(0).template data<float>()[0];
+    // Utilization is a float value, but CAFFE_EVENT only keeps int64_t values.
+    // We will keep 100x of the received utilization to maintain accuracy.
+    CAFFE_EVENT(stat_, cpu_utilization, (int)(utilization * 100));
+    return true;
+  }
+
+ private:
+  std::string statsName_;
+  struct CpuStats {
+    CAFFE_STAT_CTOR(CpuStats);
+    CAFFE_EXPORTED_STAT(cpu_utilization);
+  } stat_;
+};
+
 REGISTER_CPU_OPERATOR(StatRegistryCreate, StatRegistryCreateOp);
 REGISTER_CPU_OPERATOR(StatRegistryUpdate, StatRegistryUpdateOp);
 REGISTER_CPU_OPERATOR(StatRegistryExport, StatRegistryExportOp);
@@ -166,6 +189,7 @@ REGISTER_CPU_OPERATOR(StatRegistryExport, StatRegistryExportOp);
 REGISTER_CPU_OPERATOR(TimerBegin, TimerBeginOp);
 REGISTER_CPU_OPERATOR(TimerEnd, TimerEndOp);
 REGISTER_CPU_OPERATOR(TimerGetAndEnd, TimerGetAndEndOp);
+REGISTER_CPU_OPERATOR(CpuUtilizationReport, CpuUtilizationReportOp);
 
 OPERATOR_SCHEMA(StatRegistryCreate)
     .NumInputs(0)
@@ -173,7 +197,7 @@ OPERATOR_SCHEMA(StatRegistryCreate)
     .SetDoc(R"DOC(
 Create a StatRegistry object that will contain a map of performance counters
 keyed by name. A StatRegistry is used to gather and retrieve performance
-counts throuhgout the caffe2 codebase.
+counts throughout the caffe2 codebase.
 )DOC")
     .Output(0, "handle", "A Blob pointing to the newly created StatRegistry.");
 
@@ -206,7 +230,6 @@ OPERATOR_SCHEMA(StatRegistryExport)
     .Arg(
         "reset",
         "(default true) Whether to atomically reset the counters afterwards.");
-}
 
 OPERATOR_SCHEMA(TimerBegin)
     .NumInputs(0)
@@ -230,6 +253,17 @@ OPERATOR_SCHEMA(TimerGetAndEnd)
             publishing a CAFFE_EVENT)DOC")
     .Input(0, "timer", "Pointer to timer, obtained from TimerBegin.")
     .Output(0, "nanos", "nanoseconds in int64");
+
+OPERATOR_SCHEMA(CpuUtilizationReport)
+    .NumInputs(1)
+    .NumOutputs(0)
+    .SetDoc(R"DOC(Report the delta in max CPU utilization observed so far in the
+            plan)DOC")
+    .Input(
+        0,
+        "utilization",
+        "Delta in max CPU utilization observed, in percentage as a float value")
+    .Arg("stats_name", "String name of the stat entry holding CPU utilization");
 
 CAFFE_KNOWN_TYPE(TimerInstance*);
 CAFFE_KNOWN_TYPE(std::unique_ptr<caffe2::StatRegistry>);

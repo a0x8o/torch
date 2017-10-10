@@ -14,6 +14,7 @@ using namespace caffe2;
 
 static void BM_CUDAContextCreation(benchmark::State& state) {
   CAFFE2_SKIP_IF_NO_GPU;
+  volatile CUDAContext context_so_we_do_initialization_work;
   while (state.KeepRunning()) {
     volatile CUDAContext context;
   }
@@ -47,6 +48,26 @@ static void BM_cudaSetDevice(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_cudaSetDevice);
+
+static void BM_cudaSetAndGetDevice(benchmark::State& state) {
+  CAFFE2_SKIP_IF_NO_GPU;
+  int total = NumCudaDevices();
+  int i = 0;
+  int id;
+  while (state.KeepRunning()) {
+    CUDA_ENFORCE(cudaSetDevice((i++) % total));
+    CUDA_ENFORCE(cudaGetDevice(&id));
+  }
+}
+BENCHMARK(BM_cudaSetAndGetDevice);
+
+static void BM_cudaSetSameDevice(benchmark::State& state) {
+  CAFFE2_SKIP_IF_NO_GPU;
+  while (state.KeepRunning()) {
+    CUDA_ENFORCE(cudaSetDevice(0));
+  }
+}
+BENCHMARK(BM_cudaSetSameDevice);
 
 static void BM_cudaStreamCreateSyncDelete(benchmark::State& state) {
   CAFFE2_SKIP_IF_NO_GPU;
@@ -149,5 +170,38 @@ static void BM_OperatorCreationCUDA(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_OperatorCreationCUDA);
+
+static void BM_RawAllocDeallocCPU(benchmark::State& state) {
+  while (state.KeepRunning()) {
+    // Allocating only 1 byte in order to measure the overhead.
+    auto ptr_and_deleter = GetCPUAllocator()->New(1);
+    // Deallocate.
+    ptr_and_deleter.second(ptr_and_deleter.first);
+  }
+}
+BENCHMARK(BM_RawAllocDeallocCPU);
+
+static void BM_TensorAllocDeallocCPU(benchmark::State& state) {
+  Tensor<CPUContext> tensor;
+  // small allocation
+  tensor.Resize(32, 32);
+  while (state.KeepRunning()) {
+    CHECK(tensor.mutable_data<float>());
+    tensor.FreeMemory();
+  }
+}
+BENCHMARK(BM_TensorAllocDeallocCPU);
+
+static void BM_TensorAllocDeallocCUDA(benchmark::State& state) {
+  CAFFE2_SKIP_IF_NO_GPU;
+  Tensor<CUDAContext> tensor;
+  // small allocation
+  tensor.Resize(32, 32);
+  while (state.KeepRunning()) {
+    CHECK(tensor.mutable_data<float>());
+    tensor.FreeMemory();
+  }
+}
+BENCHMARK(BM_TensorAllocDeallocCUDA);
 
 BENCHMARK_MAIN()

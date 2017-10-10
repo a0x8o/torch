@@ -1,9 +1,9 @@
 #include "caffe2/operators/batch_matmul_op.h"
+#include "caffe2/core/operator_schema.h"
 
 namespace caffe2 {
-namespace {
 
-REGISTER_CPU_OPERATOR(BatchMatMul, BatchMatMulOp<float, CPUContext>);
+REGISTER_CPU_OPERATOR(BatchMatMul, BatchMatMulOp<CPUContext>);
 
 OPERATOR_SCHEMA(BatchMatMul)
     .NumInputs(2)
@@ -16,7 +16,29 @@ size (C x K x N) where C is the batch size and i ranges from 0 to C-1.
     .Input(1, "B", "3D matrix of size (C x K x N)")
     .Output(0, "Y", "3D matrix of size (C x M x N)")
     .Arg("trans_a", "Pass 1 to transpose A before multiplication")
-    .Arg("trans_b", "Pass 1 to transpose B before multiplication");
+    .Arg("trans_b", "Pass 1 to transpose B before multiplication")
+    .TensorInferenceFunction([](const OperatorDef& def,
+                                const vector<TensorShape>& in) {
+      ArgumentHelper helper(def);
+      int a_dim0;
+      int b_dim1;
+      if (helper.GetSingleArgument<int>("trans_a", 0)) {
+        a_dim0 = in[0].dims(2);
+      } else {
+        a_dim0 = in[0].dims(1);
+      }
+
+      if (helper.GetSingleArgument<int>("trans_b", 0)) {
+        b_dim1 = in[1].dims(1);
+      } else {
+        b_dim1 = in[1].dims(2);
+      }
+      return vector<TensorShape> {
+          CreateTensorShape(vector<TIndex> {
+              in[0].dims(0), a_dim0, b_dim1},
+              in[0].data_type())
+      };
+    });
 
 class GetBatchMatMulGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
@@ -26,21 +48,28 @@ class GetBatchMatMulGradient : public GradientMakerBase {
     bool trans_a = 0;
     bool trans_b = 0;
 
-    if (HasArgument(Def(), "trans_a")) {
+    if (ArgumentHelper::HasArgument(Def(), "trans_a")) {
       trans_a = GetArgument(Def(), "trans_a").i();
     }
-    if (HasArgument(Def(), "trans_b")) {
+    if (ArgumentHelper::HasArgument(Def(), "trans_b")) {
       trans_b = GetArgument(Def(), "trans_b").i();
     }
 
-    const auto no_trans_arg = vector<Argument>();
-    const auto trans_a_arg = vector<Argument>{
+    auto no_trans_arg = vector<Argument>();
+    auto trans_a_arg = vector<Argument>{
         MakeArgument<int>("trans_a", 1)};
-    const auto trans_b_arg = vector<Argument>{
+    auto trans_b_arg = vector<Argument>{
         MakeArgument<int>("trans_b", 1)};
-    const auto trans_both_arg = vector<Argument>{
+    auto trans_both_arg = vector<Argument>{
         MakeArgument<int>("trans_a", 1),
         MakeArgument<int>("trans_b", 1)};
+
+    if (ArgumentHelper::HasArgument(Def(), "use_scratch")) {
+      no_trans_arg.push_back(MakeArgument<int>("use_scratch", 1));
+      trans_a_arg.push_back(MakeArgument<int>("use_scratch", 1));
+      trans_b_arg.push_back(MakeArgument<int>("use_scratch", 1));
+      trans_both_arg.push_back(MakeArgument<int>("use_scratch", 1));
+    }
 
     if (trans_a) {
       if (trans_b) {
@@ -120,5 +149,4 @@ class GetBatchMatMulGradient : public GradientMakerBase {
 
 REGISTER_GRADIENT(BatchMatMul, GetBatchMatMulGradient);
 
-} // namespace
 } // namespace caffe2

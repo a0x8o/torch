@@ -66,6 +66,7 @@ hypothesis.settings.register_profile(
         derandomize=True,
         suppress_health_check=[hypothesis.HealthCheck.too_slow],
         database=None,
+        min_satisfying_examples=1,
         max_examples=100,
         verbosity=hypothesis.Verbosity.verbose))
 
@@ -75,6 +76,7 @@ hypothesis.settings.register_profile(
         suppress_health_check=[hypothesis.HealthCheck.too_slow],
         database=None,
         max_examples=10,
+        min_satisfying_examples=1,
         verbosity=hypothesis.Verbosity.verbose))
 hypothesis.settings.register_profile(
     "debug",
@@ -82,6 +84,7 @@ hypothesis.settings.register_profile(
         suppress_health_check=[hypothesis.HealthCheck.too_slow],
         database=None,
         max_examples=1000,
+        min_satisfying_examples=1,
         verbosity=hypothesis.Verbosity.verbose))
 hypothesis.settings.load_profile(
     'sandcastle' if is_sandcastle() else os.getenv('CAFFE2_HYPOTHESIS_PROFILE',
@@ -117,6 +120,10 @@ def arrays(dims, dtype=np.float32, elements=None):
 def tensor(min_dim=1, max_dim=4, dtype=np.float32, elements=None, **kwargs):
     dims_ = st.lists(dims(**kwargs), min_size=min_dim, max_size=max_dim)
     return dims_.flatmap(lambda dims: arrays(dims, dtype, elements))
+
+
+def tensor1d(min_len=1, max_len=64, dtype=np.float32, elements=None):
+    return tensor(1, 1, dtype, elements, min_value=min_len, max_value=max_len)
 
 
 def segment_ids(size, is_sorted):
@@ -192,7 +199,8 @@ def lengths_tensor(min_segments=None, max_segments=None, *args, **kwargs):
 
 def sparse_segmented_tensor(min_dim=1, max_dim=4, dtype=np.float32,
                             is_sorted=True, elements=None, allow_empty=False,
-                            segment_generator=segment_ids, **kwargs):
+                            segment_generator=segment_ids, itype=np.int64,
+                            **kwargs):
     gen_empty = st.booleans() if allow_empty else st.just(False)
     data_dims_ = st.lists(dims(**kwargs), min_size=min_dim, max_size=max_dim)
     all_dims_ = st.tuples(gen_empty, data_dims_).flatmap(
@@ -203,7 +211,7 @@ def sparse_segmented_tensor(min_dim=1, max_dim=4, dtype=np.float32,
         ))
     return all_dims_.flatmap(lambda dims: st.tuples(
         arrays(dims[0], dtype, elements),
-        arrays(dims[1], dtype=np.int64, elements=st.integers(
+        arrays(dims[1], dtype=itype, elements=st.integers(
             min_value=0, max_value=dims[0][0] - 1)),
         segment_generator(dims[1], is_sorted=is_sorted),
     ))
@@ -218,6 +226,12 @@ def tensors(n, min_dim=1, max_dim=4, dtype=np.float32, elements=None, **kwargs):
     return dims_.flatmap(
         lambda dims: st.lists(arrays(dims, dtype, elements),
                               min_size=n, max_size=n))
+
+
+def tensors1d(n, min_len=1, max_len=64, dtype=np.float32, elements=None):
+    return tensors(
+        n, 1, 1, dtype, elements, min_value=min_len, max_value=max_len
+    )
 
 
 cpu_do = caffe2_pb2.DeviceOption()
@@ -405,9 +419,8 @@ class HypothesisTestCase(test_util.TestCase):
                     ref_vals,
                     atol=threshold,
                     rtol=threshold,
-                    err_msg='Gradient {0} is not matching the reference'.format(
-                        val_name,
-                    ),
+                    err_msg='Gradient {0} (x) is not matching the reference (y)'
+                    .format(val_name),
                 )
                 if ref_indices is not None:
                     indices = workspace.FetchBlob(str(grad_names.indices))
@@ -498,13 +511,16 @@ class HypothesisTestCase(test_util.TestCase):
         op.device_option.CopyFrom(device_option)
 
         with temp_workspace():
+            if (len(op.input) > len(inputs)):
+                raise ValueError(
+                    'must supply an input for each input on the op: %s vs %s' %
+                    (op.input, inputs))
             for (n, b) in zip(op.input, inputs):
                 workspace.FeedBlob(
                     n,
                     b,
                     device_option=input_device_options.get(n, device_option)
                 )
-                print("Input", n, input_device_options.get(n, device_option))
             net = core.Net("opnet")
             net.Proto().op.extend([op])
             test_shape_inference = False
@@ -547,21 +563,27 @@ class HypothesisTestCase(test_util.TestCase):
                     self._assertInferTensorChecks(
                         output_blob_name, shapes, types, output)
                 outs.append(output)
-            if grad_reference and output_to_grad:
+            if grad_reference is not None:
+                assert output_to_grad is not None, \
+                    "If grad_reference is set," \
+                    "output_to_grad has to be set as well"
+
                 with core.DeviceScope(device_option):
                     self._assertGradReferenceChecks(
                         op, inputs, reference_outputs,
-                        output_to_grad, grad_reference)
+                        output_to_grad, grad_reference,
+                        threshold=threshold)
             return outs
 
     def assertValidationChecks(
-        self,
-        device_option,
-        op,
-        inputs,
-        validator,
-        input_device_options=None,
-        as_kwargs=True
+            self,
+            device_option,
+            op,
+            inputs,
+            validator,
+            input_device_options=None,
+            as_kwargs=True,
+            init_net=None,
     ):
         if input_device_options is None:
             input_device_options = {}
@@ -579,6 +601,8 @@ class HypothesisTestCase(test_util.TestCase):
                     b,
                     device_option=input_device_options.get(n, device_option)
                 )
+            if init_net:
+                workspace.RunNetOnce(init_net)
             workspace.RunOperatorOnce(op)
             outputs = [workspace.FetchBlob(n) for n in op.output]
             if as_kwargs:
@@ -586,3 +610,31 @@ class HypothesisTestCase(test_util.TestCase):
                     list(op.input) + list(op.output), inputs + outputs)))
             else:
                 validator(inputs=inputs, outputs=outputs)
+
+    def assertRunOpRaises(
+        self,
+        device_option,
+        op,
+        inputs,
+        input_device_options=None,
+        exception=(Exception,),
+        regexp=None,
+    ):
+        if input_device_options is None:
+            input_device_options = {}
+
+        op = copy.deepcopy(op)
+        op.device_option.CopyFrom(device_option)
+
+        with temp_workspace():
+            for (n, b) in zip(op.input, inputs):
+                workspace.FeedBlob(
+                    n,
+                    b,
+                    device_option=input_device_options.get(n, device_option)
+                )
+            if regexp is None:
+                self.assertRaises(exception, workspace.RunOperatorOnce, op)
+            else:
+                self.assertRaisesRegexp(
+                    exception, regexp, workspace.RunOperatorOnce, op)

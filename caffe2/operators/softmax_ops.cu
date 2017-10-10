@@ -296,15 +296,15 @@ bool SoftmaxWithLossOp<float, CUDAContext>::RunOnDevice() {
   total_weight_ptr_.Resize(1);
 
   if (label_prob_mode_) {
-    DCHECK_GE(T.ndim(), 2);
-    DCHECK_EQ(T.size_to_dim(canonical_axis), N);
-    DCHECK_EQ(T.size_from_dim(canonical_axis), D);
+    CAFFE_ENFORCE_GE(T.ndim(), 2);
+    CAFFE_ENFORCE_EQ(T.size_to_dim(canonical_axis), N);
+    CAFFE_ENFORCE_EQ(T.size_from_dim(canonical_axis), D);
   } else {
     if (T.ndim() == canonical_axis) {
-      DCHECK_EQ(T.size(), N);
+      CAFFE_ENFORCE_EQ(T.size(), N);
     } else {
-      DCHECK_EQ(T.size_to_dim(canonical_axis), N);
-      DCHECK_EQ(T.size_from_dim(canonical_axis), 1);
+      CAFFE_ENFORCE_EQ(T.size_to_dim(canonical_axis), N);
+      CAFFE_ENFORCE_EQ(T.size_from_dim(canonical_axis), 1);
     }
   }
 
@@ -365,7 +365,7 @@ bool SoftmaxWithLossOp<float, CUDAContext>::RunOnDevice() {
   if (weights) {
     // Sum weights
     math::Sum<float, CUDAContext>(
-        N, weights, total_weight_ptr_.mutable_data<float>(), &context_);
+        N, weights, total_weight_ptr_.mutable_data<float>(), &context_, &scratch_);
     cudaMemcpyAsync(
         &total_weight,
         total_weight_ptr_.data<float>(),
@@ -377,7 +377,7 @@ bool SoftmaxWithLossOp<float, CUDAContext>::RunOnDevice() {
   // Sum of all losses
   float* avg_loss_data = avg_loss->mutable_data<float>();
   math::Sum<float, CUDAContext>(
-      losses_.size(), losses_.data<float>(), avg_loss_data, &context_);
+      losses_.size(), losses_.data<float>(), avg_loss_data, &context_, &scratch_);
   // Average of input batch size
   if (total_weight > 0) {
     math::Scale<float, CUDAContext>(
@@ -399,9 +399,9 @@ bool SpatialSoftmaxWithLossOp<float, CUDAContext>::RunOnDevice() {
   D = X.dim32(1);
   P->ResizeLike(X);
   total_weight_ptr_.Resize(1);
-  DCHECK_EQ(X.ndim(), 4);
-  DCHECK_EQ(T.ndim(), 3);
-  DCHECK_EQ(T.dim32(0), N);
+  CAFFE_ENFORCE_EQ(X.ndim(), 4);
+  CAFFE_ENFORCE_EQ(T.ndim(), 3);
+  CAFFE_ENFORCE_EQ(T.dim32(0), N);
 
   int H = X.dim32(2);
   int W = X.dim32(3);
@@ -452,7 +452,8 @@ bool SpatialSoftmaxWithLossOp<float, CUDAContext>::RunOnDevice() {
       weights_.size(),
       weights_.data<float>(),
       total_weight_ptr_.mutable_data<float>(),
-      &context_);
+      &context_,
+      &scratch_);
   cudaMemcpyAsync(
       &h_total_weight,
       total_weight_ptr_.data<float>(),
@@ -461,7 +462,7 @@ bool SpatialSoftmaxWithLossOp<float, CUDAContext>::RunOnDevice() {
       context_.cuda_stream());
 
   math::Sum<float, CUDAContext>(
-      losses_.size(), losses_.data<float>(), avg_loss_data, &context_);
+      losses_.size(), losses_.data<float>(), avg_loss_data, &context_, &scratch_);
 
   // Final scaling
   if (h_total_weight > 0) {
@@ -498,15 +499,15 @@ bool SoftmaxWithLossGradientOp<float, CUDAContext>::RunOnDevice() {
   total_weight_ptr_.Resize(1);
 
   if (label_prob_mode_) {
-    DCHECK_GE(T.ndim(), 2);
-    DCHECK_EQ(T.size_to_dim(canonical_axis), N);
-    DCHECK_EQ(T.size_from_dim(canonical_axis), D);
+    CAFFE_ENFORCE_GE(T.ndim(), 2);
+    CAFFE_ENFORCE_EQ(T.size_to_dim(canonical_axis), N);
+    CAFFE_ENFORCE_EQ(T.size_from_dim(canonical_axis), D);
   } else {
     if (T.ndim() == canonical_axis) {
-      DCHECK_EQ(T.size(), N);
+      CAFFE_ENFORCE_EQ(T.size(), N);
     } else {
-      DCHECK_EQ(T.size_to_dim(canonical_axis), N);
-      DCHECK_EQ(T.size_from_dim(canonical_axis), 1);
+      CAFFE_ENFORCE_EQ(T.size_to_dim(canonical_axis), N);
+      CAFFE_ENFORCE_EQ(T.size_from_dim(canonical_axis), 1);
     }
   }
 
@@ -555,7 +556,7 @@ bool SoftmaxWithLossGradientOp<float, CUDAContext>::RunOnDevice() {
   if (weights) {
     // Sum weights
     math::Sum<float, CUDAContext>(
-        N, weights, total_weight_ptr_.mutable_data<float>(), &context_);
+        N, weights, total_weight_ptr_.mutable_data<float>(), &context_, &scratch_);
     cudaMemcpyAsync(
         &total_weight,
         total_weight_ptr_.data<float>(),
@@ -608,8 +609,8 @@ bool SpatialSoftmaxWithLossGradientOp<float, CUDAContext>::RunOnDevice() {
 
   total_weight_ptr_.Resize(1);
   // Spatial mode, compute softmax for each x, y location
-  DCHECK_EQ(X.ndim(), 4);
-  DCHECK_EQ(T.ndim(), 3);
+  CAFFE_ENFORCE_EQ(X.ndim(), 4);
+  CAFFE_ENFORCE_EQ(T.ndim(), 3);
 
   int H = X.dim32(2);
   int W = X.dim32(3);
@@ -642,7 +643,8 @@ bool SpatialSoftmaxWithLossGradientOp<float, CUDAContext>::RunOnDevice() {
       weights_.size(),
       weights_.data<float>(),
       total_weight_ptr_.mutable_data<float>(),
-      &context_);
+      &context_,
+      &scratch_);
 
   // Somewhat awkward scalar passing from device to host
   float h_total_weight;
@@ -761,7 +763,6 @@ bool SoftmaxGradientOp<float, CUDAContext>::RunOnDevice() {
   return true;
 }
 
-namespace {
 REGISTER_CUDA_OPERATOR(SoftmaxWithLoss,
                        SoftmaxWithLossOp<float, CUDAContext>);
 REGISTER_CUDA_OPERATOR(SoftmaxWithLossGradient,
@@ -775,5 +776,4 @@ REGISTER_CUDA_OPERATOR(
 REGISTER_CUDA_OPERATOR(Softmax, SoftmaxOp<float, CUDAContext>);
 REGISTER_CUDA_OPERATOR(SoftmaxGradient, SoftmaxGradientOp<float, CUDAContext>);
 
-} // namespace
 } // namespace caffe2

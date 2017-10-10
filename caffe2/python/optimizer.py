@@ -5,21 +5,29 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from past.builtins import basestring
 
-from caffe2.python import core, scope
+import numpy as np
+
+from caffe2.python import core, scope, workspace
 from caffe2.python.modeling import parameter_info
 from caffe2.proto import caffe2_pb2
 
 
 _OPTIMIZER_ITERATION_NAME = "optimizer_iteration"
+_LEARNING_RATE_INJECTION = "lr_injection"
 
 AuxOptimizerParams = namedtuple("AuxOptimizerParams", ["local", "shared"])
+_optimizer_instance_count = defaultdict(int)
+
 
 class Optimizer(object):
     def __init__(self):
         self._aux_params = AuxOptimizerParams(local=[], shared=[])
+        self._instance_num = _optimizer_instance_count[self.__class__.__name__]
+        _optimizer_instance_count[self.__class__.__name__] += 1
+        self._lr_multiplier = None
 
     '''
     Adds optimization operators to the net for given parameter and its gradient
@@ -44,10 +52,35 @@ class Optimizer(object):
     def _run(self, net, param_init_net, param_info):
         raise Exception("Not Impelemented")
 
-    @staticmethod
-    def build_lr(net, param_init_net, base_learning_rate,
-                 learning_rate_blob="lr", policy="fixed",
+    def get_cpu_blob_name(self, base_str):
+        classname = self.__class__.__name__
+        return '%s_%d_%s_cpu' % (classname, self._instance_num, base_str)
+
+    def get_gpu_blob_name(self, base_str, gpu_id):
+        classname = self.__class__.__name__
+        return '%s_%d_%s_gpu%d' % (
+            classname, self._instance_num, base_str, gpu_id
+        )
+
+    def make_unique_blob_name(self, base_str):
+        """
+        Returns a blob name that will be unique to the current device
+        and optimizer instance.
+        """
+        current_scope = scope.CurrentDeviceScope()
+        if current_scope is None:
+            return self.get_cpu_blob_name(base_str)
+
+        if current_scope.device_type == caffe2_pb2.CUDA:
+            return self.get_gpu_blob_name(base_str, current_scope.cuda_gpu_id)
+        else:
+            return self.get_cpu_blob_name(base_str)
+
+    def build_lr(self, net, param_init_net, base_learning_rate,
+                 learning_rate_blob=None, policy="fixed",
                  iter_val=0, **kwargs):
+        if learning_rate_blob is None:
+            learning_rate_blob = self.make_unique_blob_name('lr')
         if not param_init_net.BlobIsDefined(_OPTIMIZER_ITERATION_NAME):
             # Add training operators.
             with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
@@ -60,16 +93,34 @@ class Optimizer(object):
         else:
             iteration = param_init_net.GetBlobRef(_OPTIMIZER_ITERATION_NAME)
 
-        # There is one interesting thing here: since we are minimizing, we are
-        # doing "descent" so the learning rate is set to be negative.
-        lr = net.LearningRate(
-            [iteration],
-            learning_rate_blob,
-            base_lr=-base_learning_rate,
-            policy=policy,
-            **kwargs
-        )
+        if not net.BlobIsDefined(learning_rate_blob):
+            # There is one interesting thing here: since we are minimizing, we are
+            # doing "descent" so the learning rate is set to be negative.
+            lr = net.LearningRate(
+                [iteration],
+                learning_rate_blob,
+                base_lr=-base_learning_rate,
+                policy=policy,
+                **kwargs
+            )
+        else:
+            lr = net.GetBlobRef(learning_rate_blob)
+
+        if self._lr_multiplier is not None:
+            lr_multiplier = net.CopyFromCPUInput(
+                self._lr_multiplier, self.make_unique_blob_name('lr_multiplier')
+            )
+            scaled_lr = net.Mul(
+                [lr, lr_multiplier],
+                self.make_unique_blob_name('scaled_lr'),
+                broadcast=1,
+            )
+            lr = scaled_lr
+
         return lr, iteration
+
+    def add_lr_multiplier(self, lr_multiplier):
+        self._lr_multiplier = lr_multiplier
 
     @staticmethod
     def dedup(net, sparse_dedup_aggregator, grad):
@@ -115,12 +166,14 @@ class Optimizer(object):
 
 class SgdOptimizer(Optimizer):
     def __init__(self, base_learning_rate=0.01, policy='fixed',
-                 momentum=0.0, nesterov=1, **kwargs):
+                 momentum=0.0, nesterov=1, sparse_dedup_aggregator=None,
+                 **kwargs):
         super(SgdOptimizer, self).__init__()
         self.base_learning_rate = base_learning_rate
         self.policy = policy
         self.momentum = momentum
         self.nesterov = nesterov
+        self.sparse_dedup_aggregator = sparse_dedup_aggregator
         self.init_kwargs = kwargs
 
     def _run(self, net, param_init_net, param_info):
@@ -136,7 +189,6 @@ class SgdOptimizer(Optimizer):
         lr, _ = self.build_lr(
             net, param_init_net,
             base_learning_rate=self.base_learning_rate * lr_sign,
-            learning_rate_blob=str(param) + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
@@ -163,6 +215,7 @@ class SgdOptimizer(Optimizer):
 
         if isinstance(grad, core.GradientSlice):
             assert self.momentum == 0., "Doesn't support momentum for sparse"
+            grad = self.dedup(net, self.sparse_dedup_aggregator, grad)
             net.ScatterWeightedSum(
                 [param, ONE, grad.indices, grad.values, lr],
                 param
@@ -189,12 +242,14 @@ class SgdOptimizer(Optimizer):
 
 class MultiPrecisionSgdOptimizer(SgdOptimizer):
     def __init__(self, base_learning_rate=0.1, momentum=0.0,
-                 policy="fixed", nesterov=1, **kwargs):
+                 policy="fixed", nesterov=1, sparse_dedup_aggregator=None,
+                 **kwargs):
         super(SgdOptimizer, self).__init__()
         self.base_learning_rate = base_learning_rate
         self.momentum = momentum
         self.policy = policy
         self.nesterov = nesterov
+        self.sparse_dedup_aggregator = sparse_dedup_aggregator
         self.init_kwargs = kwargs
 
     def _run(self, net, param_init_net, param_info):
@@ -203,7 +258,7 @@ class MultiPrecisionSgdOptimizer(SgdOptimizer):
                 if param_info.blob_copy is not None else None
 
         # If we have a straight fp32 parameter, run the base class
-        if param_fp32 == None:
+        if param_fp32 is None:
             return SgdOptimizer._run(self, net, param_init_net, param_info)
 
         grad = param_info.grad
@@ -214,7 +269,6 @@ class MultiPrecisionSgdOptimizer(SgdOptimizer):
         lr, _ = self.build_lr(
             net, param_init_net,
             base_learning_rate=-self.base_learning_rate,
-            learning_rate_blob=param + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
@@ -270,15 +324,18 @@ class WeightDecayBuilder(Optimizer):
 
 
 class AdagradOptimizer(Optimizer):
-    def __init__(self, alpha=0.01, epsilon=1e-4, policy="fixed",
-                 sparse_dedup_aggregator=None, engine='', **kwargs):
+    def __init__(self, alpha=0.01, epsilon=1e-4, decay=1, policy="fixed",
+                 sparse_dedup_aggregator=None, rowWise=False,
+                 engine='', **kwargs):
         super(AdagradOptimizer, self).__init__()
         self.alpha = alpha
         self.epsilon = epsilon
+        self.decay = decay
         self.policy = policy
         self.sparse_dedup_aggregator = sparse_dedup_aggregator
         self.engine = engine
         self.init_kwargs = kwargs
+        self.rowWise = rowWise
 
     def _run(self, net, param_init_net, param_info):
         param = param_info.blob
@@ -290,21 +347,51 @@ class AdagradOptimizer(Optimizer):
         lr, _ = self.build_lr(
             net, param_init_net,
             base_learning_rate=self.alpha,
-            learning_rate_blob=str(param) + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
 
-        param_squared_sum = param_init_net.ConstantFill(
-            [param],
-            str(param) + "_squared_sum",
-            value=0.0
-        )
+        if self.rowWise:
+            shape = param_init_net.Shape(param, str(param) + "_shape")
+            slice_starts = np.array([0]).astype(np.int32)
+            slice_ends = np.array([1]).astype(np.int32)
+            slice_starts = param_init_net.GivenTensorIntFill(
+                [], shape=[1], values=slice_starts
+            )
+            slice_ends = param_init_net.GivenTensorIntFill(
+                [], shape=[1], values=slice_ends
+            )
+            num_rows = param_init_net.Slice(
+                [shape, slice_starts, slice_ends],
+                str(shape) + "_numrows"
+            )
+            param_squared_sum = param_init_net.ConstantFill(
+                num_rows,
+                str(param) + "_avg_squared_sum",
+                input_as_shape=1,
+                value=0.0
+            )
+        else:
+            param_squared_sum = param_init_net.ConstantFill(
+                [param],
+                str(param) + "_squared_sum",
+                value=0.0
+            )
+
         self._aux_params.local.append(param_squared_sum)
 
+        if self.rowWise:
+            assert isinstance(grad, core.GradientSlice),\
+                'If SparseAdagrad with rowWise=True, gradient must be gradientslice'
         if isinstance(grad, core.GradientSlice):
+            assert self.decay == 1.,\
+                'Decay is not implemented for SparseAdagrad and must be set to 1'
             grad = self.dedup(net, self.sparse_dedup_aggregator, grad)
-            net.SparseAdagrad(
+            if self.rowWise:
+                op = 'RowWiseSparseAdagrad'
+            else:
+                op = 'SparseAdagrad'
+            net.__getattr__(op)(
                 [param, param_squared_sum, grad.indices, grad.values, lr],
                 [param, param_squared_sum],
                 epsilon=self.epsilon,
@@ -315,6 +402,7 @@ class AdagradOptimizer(Optimizer):
                 [param, param_squared_sum, grad, lr],
                 [param, param_squared_sum],
                 epsilon=self.epsilon,
+                decay=float(self.decay),
                 engine=self.engine
             )
 
@@ -399,7 +487,6 @@ class AdamOptimizer(Optimizer):
         lr, iteration = self.build_lr(
             net, param_init_net,
             base_learning_rate=self.alpha,
-            learning_rate_blob=str(param) + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
@@ -440,6 +527,134 @@ class AdamOptimizer(Optimizer):
         return
 
 
+class YellowFinOptimizer(Optimizer):
+    """YellowFin: An automatic tuner for momentum SGD
+
+    See https://arxiv.org/abs/1706.03471 for more details. This implementation
+    has separate learning rate and momentum per each parameter."""
+
+    def __init__(self,
+                 alpha=0.1,
+                 mu=0.0,
+                 beta=0.999,
+                 curv_win_width=20,
+                 zero_debias=True,
+                 epsilon=0.1**6,
+                 policy='fixed',
+                 sparse_dedup_aggregator=None,
+                 **kwargs):
+        super(YellowFinOptimizer, self).__init__()
+        self.alpha = alpha
+        self.mu = mu
+        self.beta = beta
+        self.curv_win_width = curv_win_width
+        self.zero_debias = zero_debias
+        self.epsilon = epsilon
+        self.policy = policy
+        self.sparse_dedup_aggregator = sparse_dedup_aggregator
+        self.init_kwargs = kwargs
+
+    def _run(self, net, param_init_net, param_info):
+
+        # Note: This is number of persistent scalars in YellowFin optimizer.
+        #       It should always be the number of scalars being used. The same
+        #       number should be used in class for the operation.
+        SCALARS_MEMORY_SIZE = 5
+
+        param = param_info.blob
+        grad = param_info.grad
+        moment = param_init_net.ConstantFill(
+            [param],
+            param + "_moment",
+            value=0.0
+        )
+        curv_win = param_init_net.ConstantFill(
+            [],
+            param + "_curv_win",
+            shape=[self.curv_win_width],
+            value=0.0
+        )
+        g_avg = param_init_net.ConstantFill(
+            [param],
+            param + "_g_avg",
+            value=0.0
+        )
+        g2_avg = param_init_net.ConstantFill(
+            [param],
+            param + "_g2_avg",
+            value=0.0
+        )
+        lr_avg = param_init_net.ConstantFill(
+            [],
+            param + "_lr_avg",
+            shape=[1],
+            value=self.alpha
+        )
+        mu_avg = param_init_net.ConstantFill(
+            [],
+            param + "_mu_avg",
+            shape=[1],
+            value=self.mu
+        )
+        scalars_memory = param_init_net.ConstantFill(
+            [],
+            param + "_scalars_memory",
+            shape=[SCALARS_MEMORY_SIZE],
+            value=0.0
+        )
+
+        assert self.alpha > 0
+        assert not isinstance(grad, core.GradientSlice), \
+            "Doesn't support sparse gradients"
+
+        if not param_init_net.BlobIsDefined(_OPTIMIZER_ITERATION_NAME):
+            # Add training operators.
+            with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
+                iteration = param_init_net.ConstantFill(
+                    [],
+                    _OPTIMIZER_ITERATION_NAME,
+                    shape=[1],
+                    value=0,
+                    dtype=core.DataType.INT64)
+                iter_mutex = param_init_net.CreateMutex([],
+                                                        ["iteration_mutex"])
+                net.AtomicIter([iter_mutex, iteration], [iteration])
+        else:
+            iteration = param_init_net.GetBlobRef(_OPTIMIZER_ITERATION_NAME)
+
+        self._aux_params.shared.append(iteration)
+        self._aux_params.local.append(moment)
+        self._aux_params.local.append(lr_avg)
+        self._aux_params.local.append(mu_avg)
+        self._aux_params.local.append(curv_win)
+        self._aux_params.local.append(g_avg)
+        self._aux_params.local.append(g2_avg)
+        self._aux_params.local.append(scalars_memory)
+
+        yf_in_out_args = [
+            param,
+            moment,
+            lr_avg,
+            mu_avg,
+            curv_win,
+            g_avg,
+            g2_avg,
+            scalars_memory
+        ]
+
+        net.YellowFin(
+            yf_in_out_args + [grad, iteration],
+            yf_in_out_args,
+            beta=self.beta,
+            epsilon=self.epsilon,
+            curv_win_width=self.curv_win_width,
+            zero_debias=self.zero_debias)
+
+    def scale_learning_rate(self, scale):
+        self.alpha *= scale
+        return
+
+
 def _get_param_to_device(model):
     # Infer blob devices by going through the net and param_init_net
     # ops and observing the device used to create or use the blob.
@@ -448,42 +663,172 @@ def _get_param_to_device(model):
     return param_to_device
 
 
-def _build(model, optimizer, weights_only=False):
+def get_param_device(param_name, grad, param_to_device=None, default_device=None):
+    device = default_device
+    param_to_device = param_to_device or {}
+    # We first check if parameter's device has been inferred. If not,
+    # we check the gradient. This can happen if parameter is not output
+    # by any blob but created by a FetchBlob.
+    if param_name in param_to_device:
+        device = param_to_device[param_name]
+    else:
+        if isinstance(grad, core.GradientSlice):
+            grad = grad
+            if str(grad.values) in param_to_device:
+                device = param_to_device[str(grad.values)]
+            elif str(grad.indices) in param_to_device:
+                device = param_to_device[str(grad.indices)]
+        else:
+            grad_name = str(grad)
+            if grad_name in param_to_device:
+                device = param_to_device[grad_name]
+
+    assert device is not None,\
+        "Cannot infer device for {}: no op creates it".format(param_name)
+    return device
+
+
+def get_lr_injection():
+    """
+    Gets current value for lr_injection, a multiplier for all base
+    learning rates.
+    Must set allow_lr_injection=True when building optimizer, as it
+    relies on synchronization over CPU.
+    """
+    return workspace.FetchBlob(_LEARNING_RATE_INJECTION)
+
+
+def set_lr_injection(lr_injection_value):
+    """
+    Sets lr_injection, a multiplier for all base learning rates.
+    Must set allow_lr_injection=True when building optimizer, as it
+    relies on synchronization over CPU.
+    """
+    workspace.FeedBlob(
+        _LEARNING_RATE_INJECTION,
+        np.array(
+            [float(lr_injection_value)],
+            dtype=np.float32,
+        ),
+    )
+
+
+def _calc_norm_ratio(
+    model, params, name_scope, param_to_device, max_gradient_norm
+):
+    with core.NameScope(name_scope):
+        grad_squared_sums = []
+        for i, param in enumerate(params):
+            device = get_param_device(
+                str(param.blob), param.grad, param_to_device
+            )
+
+            with core.DeviceScope(device):
+                grad = (
+                    param.grad
+                    if not isinstance(
+                        param.grad,
+                        core.GradientSlice,
+                    ) else param.grad.values
+                )
+
+                grad_squared_sum_name = 'grad_{}_squared_sum'.format(i)
+                grad_squared_sum = model.net.SumSqrElements(
+                    grad,
+                    grad_squared_sum_name,
+                )
+                grad_squared_sum_cpu = model.net.EnsureCPUOutput(
+                    grad_squared_sum
+                )
+                grad_squared_sums.append(grad_squared_sum_cpu)
+
+        with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
+            grad_squared_full_sum = model.net.Sum(
+                grad_squared_sums,
+                'grad_squared_full_sum',
+            )
+            global_norm = model.net.Pow(
+                grad_squared_full_sum,
+                'global_norm',
+                exponent=0.5,
+            )
+            clip_norm = model.param_init_net.ConstantFill(
+                [],
+                'clip_norm',
+                shape=[],
+                value=float(max_gradient_norm),
+            )
+            max_norm = model.net.Max(
+                [global_norm, clip_norm],
+                'max_norm',
+            )
+            norm_ratio = model.net.Div(
+                [clip_norm, max_norm],
+                'norm_ratio',
+            )
+            return norm_ratio
+
+
+def _build(
+    model,
+    optimizer,
+    weights_only=False,
+    use_param_info_optim=True,
+    max_gradient_norm=None,
+    allow_lr_injection=False,
+):
     param_to_device = _get_param_to_device(model)
 
     # Validate there are no duplicate params
     model.Validate()
 
-    # Call optimizer for each param
+    params = []
     for param_info in model.GetOptimizationParamInfo():
-        if weights_only:
-            if param_info.blob not in model.weights:
-                continue
+        if weights_only and param_info.blob not in model.weights:
+            continue
+        params.append(param_info)
+
+    lr_multiplier = None
+    if max_gradient_norm is not None:
+        lr_multiplier = _calc_norm_ratio(
+            model,
+            params,
+            'norm_clipped_grad_update',
+            param_to_device,
+            max_gradient_norm,
+        )
+
+    if allow_lr_injection:
+        if not model.net.BlobIsDefined(_LEARNING_RATE_INJECTION):
+            lr_injection = model.param_init_net.ConstantFill(
+                [],
+                _LEARNING_RATE_INJECTION,
+                shape=[1],
+                value=1.0,
+            )
+        else:
+            lr_injection = _LEARNING_RATE_INJECTION
+
+        if lr_multiplier is None:
+            lr_multiplier = lr_injection
+        else:
+            lr_multiplier = model.net.Mul(
+                [lr_multiplier, lr_injection],
+                'lr_multiplier',
+                broadcast=1,
+            )
+    optimizer.add_lr_multiplier(lr_multiplier)
+
+    for param_info in params:
         param_name = str(param_info.blob)
 
-        # We first check if parameter's device has been inferred. If not,
-        # we check the gradient. This can happen if parameter is not output
-        # by any blob but created by a FetchBlob.
-        device = None
-        if param_name in param_to_device:
-            device = param_to_device[param_name]
-        else:
-            if isinstance(param_info.grad, core.GradientSlice):
-                grad = param_info.grad
-                if str(grad.values) in param_to_device:
-                    device = param_to_device[str(grad.values)]
-                elif str(grad.indices) in param_to_device:
-                    device = param_to_device[str(grad.indices)]
-            else:
-                grad_name = str(param_info.grad)
-                if grad_name in param_to_device:
-                    device = param_to_device[grad_name]
-
-        assert device is not None,\
-            "Cannot infer device for {}: no op creates it".format(param_name)
+        device = get_param_device(param_name, param_info.grad, param_to_device)
 
         with core.DeviceScope(device):
-            optimizer(model.net, model.param_init_net, param_info)
+            if param_info.optimizer and use_param_info_optim:
+                param_info.optimizer(model.net, model.param_init_net, param_info)
+            else:
+                optimizer(model.net, model.param_init_net, param_info)
     return optimizer
 
 
@@ -499,19 +844,42 @@ def add_weight_decay(model, weight_decay):
         model,
         WeightDecayBuilder(weight_decay=weight_decay),
         weights_only=True,
+        use_param_info_optim=False,
     )
 
 
-def build_sgd(model, base_learning_rate, **kwargs):
+def build_sgd(
+    model,
+    base_learning_rate,
+    max_gradient_norm=None,
+    allow_lr_injection=False,
+    **kwargs
+):
     sgd_optimizer = SgdOptimizer(base_learning_rate, **kwargs)
-    return _build(model, sgd_optimizer)
+    return _build(
+        model,
+        sgd_optimizer,
+        max_gradient_norm=max_gradient_norm,
+        allow_lr_injection=allow_lr_injection,
+    )
 
 
-def build_multi_precision_sgd(model, base_learning_rate, **kwargs):
+def build_multi_precision_sgd(
+    model,
+    base_learning_rate,
+    max_gradient_norm=None,
+    allow_lr_injection=False,
+    **kwargs
+):
     multi_prec_sgd_optimizer = MultiPrecisionSgdOptimizer(
         base_learning_rate, **kwargs
     )
-    return _build(model, multi_prec_sgd_optimizer)
+    return _build(
+        model,
+        multi_prec_sgd_optimizer,
+        max_gradient_norm=max_gradient_norm,
+        allow_lr_injection=allow_lr_injection,
+    )
 
 
 def build_ftrl(model, engine="SIMD", **kwargs):
@@ -522,11 +890,41 @@ def build_ftrl(model, engine="SIMD", **kwargs):
     return _build(model, ftrl_optimizer)
 
 
-def build_adagrad(model, base_learning_rate, parameters=None, **kwargs):
+def build_adagrad(
+    model,
+    base_learning_rate,
+    parameters=None,
+    max_gradient_norm=None,
+    allow_lr_injection=False,
+    **kwargs
+):
     adagrad_optimizer = AdagradOptimizer(alpha=base_learning_rate, **kwargs)
-    return _build(model, adagrad_optimizer)
+    return _build(
+        model,
+        adagrad_optimizer,
+        max_gradient_norm=max_gradient_norm,
+        allow_lr_injection=allow_lr_injection,
+    )
 
 
-def build_adam(model, base_learning_rate, **kwargs):
+def build_adam(
+    model,
+    base_learning_rate,
+    max_gradient_norm=None,
+    allow_lr_injection=False,
+    **kwargs
+):
     adam_optimizer = AdamOptimizer(alpha=base_learning_rate, **kwargs)
-    return _build(model, adam_optimizer)
+    return _build(
+        model,
+        adam_optimizer,
+        max_gradient_norm=max_gradient_norm,
+        allow_lr_injection=allow_lr_injection,
+    )
+
+
+def build_yellowfin(model, base_learning_rate=0.1, **kwargs):
+    yellowfin_optimizer = YellowFinOptimizer(
+        alpha=base_learning_rate,
+        **kwargs)
+    return _build(model, yellowfin_optimizer)

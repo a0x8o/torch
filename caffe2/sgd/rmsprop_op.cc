@@ -15,7 +15,7 @@ void rmsprop_update<CPUContext>(
     float momentum,
     float epsilon,
     const float* lr,
-    CPUContext* context) {
+    CPUContext* /*context*/) {
   ConstEigenVectorArrayMap<float> gVec(g, N);
   ConstEigenVectorArrayMap<float> msVec(ms, N);
   ConstEigenVectorArrayMap<float> momVec(mom, N);
@@ -29,7 +29,6 @@ void rmsprop_update<CPUContext>(
   EigenVectorArrayMap<float>(ng, N) = nmomVec;
 }
 
-namespace {
 REGISTER_CPU_OPERATOR(RmsProp, RmsPropOp<float, CPUContext>);
 OPERATOR_SCHEMA(RmsProp)
     .NumInputs(4)
@@ -41,7 +40,7 @@ Computes the RMSProp update
 (http://www.cs.toronto.edu/~tijmen/csc321/slides/lecture_slides_lec6.pdf).
 Concretely, given inputs (grad, mean_squares, mom, lr), computes:
 
-    mean_squares_o = mean_squares + (1 - decay) * (squaare(grad) - mean_squares)
+    mean_squares_o = mean_squares + (1 - decay) * (square(grad) - mean_squares)
     mom_o = momentum * mom + lr * grad / sqrt(epsilon + mean_squares_o)
     grad_o = mom_o
 
@@ -49,6 +48,5 @@ returns (grad_o, mean_squares_o, mom_o).
 
 )DOC");
 SHOULD_NOT_DO_GRADIENT(RmsProp);
-}
 
 }

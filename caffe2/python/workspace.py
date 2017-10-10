@@ -8,20 +8,14 @@ import contextlib
 from google.protobuf.message import Message
 from multiprocessing import Process
 import os
-try:
-    from past.builtins import basestring
-except ImportError:
-    print("You don't have the past package installed. ",
-          "This is necessary for python 2/3 compatibility. ",
-          "To do this, do 'pip install future'.")
-    import sys
-    sys.exit(1)
+from collections import defaultdict
+import logging
+import numpy as np
+from past.builtins import basestring
 import shutil
 import socket
 import tempfile
-import logging
 
-import numpy as np
 from caffe2.proto import caffe2_pb2
 from caffe2.python import scope, utils
 
@@ -43,7 +37,7 @@ Workspaces = C.workspaces
 BenchmarkNet = C.benchmark_net
 Predictor = C.Predictor
 
-operator_tracebacks = {}
+operator_tracebacks = defaultdict(dict)
 
 is_asan = C.is_asan
 has_gpu_support = C.has_gpu_support
@@ -51,16 +45,21 @@ if has_gpu_support:
     NumCudaDevices = C.num_cuda_devices
     SetDefaultGPUID = C.set_default_gpu_id
     GetDefaultGPUID = C.get_default_gpu_id
+    GetCUDAVersion = C.get_cuda_version
     GetCuDNNVersion = C.get_cudnn_version
 
     def GetCudaPeerAccessPattern():
         return np.asarray(C.get_cuda_peer_access_pattern())
+
+    GetDeviceProperties = C.get_device_properties
 else:
     NumCudaDevices = lambda: 0 # noqa
     SetDefaultGPUID = lambda x: None # noqa
     GetDefaultGPUID = lambda: 0 # noqa
     GetCuDNNVersion = lambda: 0 # noqa
+    GetCuDNNVersion = lambda: 0 # noqa
     GetCudaPeerAccessPattern = lambda: np.array([]) # noqa
+    GetDeviceProperties = lambda x: None # noqa
 
 
 def _GetFreeFlaskPort():
@@ -147,7 +146,12 @@ def CreateNet(net, overwrite=False, input_blobs=None):
     for input_blob in input_blobs:
         C.create_blob(input_blob)
     return CallWithExceptionIntercept(
-        C.create_net, C.last_failed_op_uuid, StringifyProto(net), overwrite)
+        C.create_net,
+        C.Workspace.current._last_failed_op_net_position,
+        GetNetName(net),
+        StringifyProto(net), overwrite,
+    )
+
 
 
 def RunOperatorOnce(operator):
@@ -162,20 +166,27 @@ def RunOperatorsOnce(operators):
     return True
 
 
-def CallWithExceptionIntercept(func, uuid_fetcher, *args, **kwargs):
+def CallWithExceptionIntercept(func, op_id_fetcher, net_name, *args, **kwargs):
     try:
         return func(*args, **kwargs)
-    except Exception as ex:
-        uuid = uuid_fetcher()
-        if uuid in operator_tracebacks:
-            for line in operator_tracebacks[uuid]:
+    except Exception:
+        op_id = op_id_fetcher()
+        net_tracebacks = operator_tracebacks.get(net_name, None)
+        print("Traceback for operator {} in network {}".format(op_id, net_name))
+        if net_tracebacks and op_id in net_tracebacks:
+            tb = net_tracebacks[op_id]
+            for line in tb:
                 print(':'.join(map(str, line)))
-        raise ex
+        raise
 
 
 def RunNetOnce(net):
     return CallWithExceptionIntercept(
-        C.run_net_once, C.last_failed_op_uuid, StringifyProto(net))
+        C.run_net_once,
+        C.Workspace.current._last_failed_op_net_position,
+        GetNetName(net),
+        StringifyProto(net),
+    )
 
 
 def RunNet(name, num_iter=1, allow_fail=False):
@@ -189,8 +200,11 @@ def RunNet(name, num_iter=1, allow_fail=False):
       True or an exception.
     """
     return CallWithExceptionIntercept(
-        C.run_net, C.last_failed_op_uuid,
-        StringifyNetName(name), num_iter, allow_fail)
+        C.run_net,
+        C.Workspace.current._last_failed_op_net_position,
+        GetNetName(name),
+        StringifyNetName(name), num_iter, allow_fail,
+    )
 
 
 def RunPlan(plan_or_step):
@@ -244,6 +258,16 @@ def StringifyBlobName(name):
 
 def StringifyNetName(name):
     return _StringifyName(name, "Net")
+
+
+def GetNetName(net):
+    if isinstance(net, basestring):
+        return net
+    if type(net).__name__ == "Net":
+        return net.Name()
+    if isinstance(net, caffe2_pb2.NetDef):
+        return net.name
+    raise Exception("Not a Net object: {}".format(str(net)))
 
 
 def FeedBlob(name, arr, device_option=None):
@@ -302,6 +326,68 @@ def FetchBlob(name):
       Fetched blob (numpy array or string) if successful
     """
     return C.fetch_blob(StringifyBlobName(name))
+
+
+def ApplyTransform(transform_key, net):
+    """Apply a Transform to a NetDef protobuf object, and returns the new
+    transformed NetDef.
+
+    Inputs:
+      transform_key: the name of the transform, as it is stored in the registry
+      net: a NetDef protobuf object
+    Returns:
+      Transformed NetDef protobuf object.
+    """
+    transformed_net = caffe2_pb2.NetDef()
+    transformed_str = C.apply_transform(
+        str(transform_key).encode('utf-8'),
+        net.SerializeToString(),
+    )
+    transformed_net.ParseFromString(transformed_str)
+    return transformed_net
+
+
+def ApplyTransformIfFaster(transform_key, net, init_net, **kwargs):
+    """Apply a Transform to a NetDef protobuf object, and returns the new
+    transformed NetDef, only if it runs faster than the original.
+
+    The runs are performed on the current active workspace (gWorkspace).
+    You should initialize that workspace before making a call to this function.
+
+    Inputs:
+      transform_key: the name of the transform, as it is stored in the registry
+      net: a NetDef protobuf object
+      init_net: The net to initialize the workspace.
+      warmup_runs (optional):
+        Determines how many times the net is run before testing.
+        Will be 5 by default.
+      main_runs (optional):
+        Determines how many times the net is run during testing.
+        Will be 10 by default.
+      improvement_threshold (optional):
+        Determines the factor which the new net needs to be faster
+        in order to replace the old. Will be 1.01 by default.
+
+    Returns:
+      Either a Transformed NetDef protobuf object, or the original netdef.
+    """
+
+    warmup_runs = kwargs['warmup_runs'] if 'warmup_runs' in kwargs else 5
+    main_runs = kwargs['main_runs'] if 'main_runs' in kwargs else 10
+    improvement_threshold = kwargs['improvement_threshold'] \
+        if 'improvement_threshold' in kwargs else 1.01
+
+    transformed_net = caffe2_pb2.NetDef()
+    transformed_str = C.apply_transform_if_faster(
+        str(transform_key).encode('utf-8'),
+        net.SerializeToString(),
+        init_net.SerializeToString(),
+        warmup_runs,
+        main_runs,
+        float(improvement_threshold),
+    )
+    transformed_net.ParseFromString(transformed_str)
+    return transformed_net
 
 
 def GetNameScope():
@@ -456,7 +542,11 @@ def FeedImmediate(*args, **kwargs):
 
 def _Workspace_create_net_with_exception_intercept(ws, net, overwrite=False):
     return CallWithExceptionIntercept(
-        ws._create_net, ws.last_failed_op_uuid, StringifyProto(net), overwrite)
+        ws._create_net,
+        ws._last_failed_op_net_position,
+        GetNetName(net),
+        StringifyProto(net), overwrite,
+    )
 
 
 C.Workspace.create_net = _Workspace_create_net_with_exception_intercept
@@ -468,19 +558,20 @@ def _Workspace_run(ws, obj):
     if isinstance(obj, caffe2_pb2.PlanDef):
         return ws._run_plan(obj.SerializeToString())
     if isinstance(obj, caffe2_pb2.NetDef):
-        return ws._run_net(obj.SerializeToString())
+        return CallWithExceptionIntercept(
+            ws._run_net,
+            ws._last_failed_op_net_position,
+            GetNetName(obj),
+            obj.SerializeToString(),
+        )
+        # return ws._run_net(obj.SerializeToString())
     if isinstance(obj, caffe2_pb2.OperatorDef):
         return ws._run_operator(obj.SerializeToString())
     raise ValueError(
         "Don't know how to do Workspace.run() on {}".format(type(obj)))
 
 
-def _Workspace_run_with_exception_intercept(ws, obj):
-    return CallWithExceptionIntercept(
-        _Workspace_run, ws.last_failed_op_uuid, ws, obj)
-
-
-C.Workspace.run = _Workspace_run_with_exception_intercept
+C.Workspace.run = _Workspace_run
 
 
 def _Blob_feed(blob, arg, device_option=None):

@@ -5,7 +5,7 @@ from __future__ import unicode_literals
 
 from caffe2.python import model_helper, workspace, core, rnn_cell
 from caffe2.proto import caffe2_pb2
-
+from future.utils import viewitems
 import numpy as np
 
 import unittest
@@ -48,10 +48,10 @@ class TestLSTMs(unittest.TestCase):
                 [1, batch_size, hidden_dim], dtype=np.float32
             ))
 
-            cudnn_output, cudnn_last_hidden, _, param_extract = rnn_cell.cudnn_LSTM(
+            cudnn_output, cudnn_last_hidden, cudnn_last_state, param_extract = rnn_cell.cudnn_LSTM(
                 model=cudnn_model,
                 input_blob=input_blob,
-                initial_states=("hidden_init_cudnn", "hidden_init_cudnn"),
+                initial_states=("hidden_init_cudnn", "cell_init_cudnn"),
                 dim_in=input_dim,
                 dim_out=hidden_dim,
                 scope="CUDNN",
@@ -63,7 +63,7 @@ class TestLSTMs(unittest.TestCase):
                 ), "CUDNN/loss"
             )
 
-            own_output, own_last_hidden, _, last_state, own_params = rnn_cell.LSTM(
+            own_output, own_last_hidden, _, own_last_state, own_params = rnn_cell.LSTM(
                 model=own_model,
                 input_blob=input_blob,
                 seq_lengths="seq_lengths",
@@ -98,6 +98,12 @@ class TestLSTMs(unittest.TestCase):
                     [param, ONE, own_model.param_to_grad[param], LR], param
                 )
 
+            # Copy states over
+            own_model.net.Copy(own_last_hidden, "hidden_init")
+            own_model.net.Copy(own_last_state, "cell_init")
+            cudnn_model.net.Copy(cudnn_last_hidden, "CUDNN/hidden_init_cudnn")
+            cudnn_model.net.Copy(cudnn_last_state, "CUDNN/cell_init_cudnn")
+
             workspace.RunNetOnce(cudnn_model.param_init_net)
             workspace.CreateNet(cudnn_model.net)
 
@@ -108,11 +114,13 @@ class TestLSTMs(unittest.TestCase):
             # to our own.
             (param_extract_net, param_extract_mapping) = param_extract
             workspace.RunNetOnce(param_extract_net)
-            cudnn_lstm_params = {}
-            for input_type, pars in param_extract_mapping.items():
-                cudnn_lstm_params[input_type] = {}
-                for k, v in pars.items():
-                    cudnn_lstm_params[input_type][k] = workspace.FetchBlob(v[0])
+            cudnn_lstm_params = {
+                input_type: {
+                    k: workspace.FetchBlob(v[0])
+                    for k, v in viewitems(pars)
+                }
+                for input_type, pars in viewitems(param_extract_mapping)
+            }
 
             # Run the model 3 times, so that some parameter updates are done
             workspace.RunNet(cudnn_model.net.Proto().name, 3)

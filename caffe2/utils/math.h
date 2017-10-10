@@ -23,6 +23,9 @@ extern "C" {
 
 namespace caffe2 {
 
+template <class Context>
+class Tensor;
+
 // An empty class as a placeholder for a math function that has no specific
 // engine specified.
 class DefaultEngine {};
@@ -59,6 +62,18 @@ template <typename T, class Context>
 void Exp(const int N, const T* x, T* y, Context* context);
 template <typename T, class Context>
 void Log(const int N, const T* x, T* y, Context* context);
+template <typename T, class Context>
+void Cos(const int N, const T* x, T* y, Context* context);
+template <typename T, class Context>
+void Sin(const int N, const T* x, T* y, Context* context);
+template <typename T, class Context>
+void SinCos(const int N, const T* x, T* ys, T* yc, Context* context);
+template <typename T, class Context>
+void Abs(const int N, const T* x, T* y, Context* context);
+template <typename T, class Context>
+void Sqrt(const int N, const T* x, T* y, Context* context);
+template <typename T, class Context>
+void InvSqrt(const int N, const T* x, T* y, Context* context);
 template <typename T, class Context>
 void Sqr(const int N, const T* x, T* y, Context* context);
 
@@ -116,6 +131,21 @@ CAFFE2_DECLARE_BINARY_OP(Div);
 
 #undef CAFFE2_DECLARE_BINARY_OP
 
+template <typename T, class Context>
+void ReduceMin(
+    const int N,
+    const T* x,
+    T* y,
+    Tensor<Context>* scratch_ptr,
+    Context* context);
+template <typename T, class Context>
+void ReduceMax(
+    const int N,
+    const T* x,
+    T* y,
+    Tensor<Context>* scratch_ptr,
+    Context* context);
+
 // Adds batch sub-tensors elementwise to output. Stripe is the stripe length
 // and N is the number of elements to add (size of Y).
 template <typename T, class Context>
@@ -138,6 +168,19 @@ void RowwiseMax(const int N, const int D, const T* x, T* y,
 template <typename T, class Context>
 void ColwiseMax(const int N, const int D, const T* x, T* y,
                 Context* context);
+
+// Elemwise maximum of vector x and vector y. z[i] = max(x[i], y[i])
+template <typename T, class Context>
+void ElemwiseMax(const int N, const T* x, const T* y, T* z, Context* context);
+
+// Elemwise maximum of vector x and scalar alpha. y[i] = max(x[i], alpha)
+template <typename T, class Context>
+void Maximum(
+    const int N,
+    const float alpha,
+    const T* x,
+    T* y,
+    Context* context);
 
 // Decaf gemm provides a simpler interface to the gemm functions, with the
 // limitation that the data has to be contiguous in memory.
@@ -174,6 +217,27 @@ void GemmEx(
     T* C,
     const int ldc,
     Context* context);
+
+// GemmBatched provides a simple abstraction into library routines
+template <typename T, class Context, class Engine = DefaultEngine>
+void GemmBatched(
+    const CBLAS_TRANSPOSE TransA,
+    const CBLAS_TRANSPOSE TransB,
+    const int A_size,
+    const int A_batches,
+    const int B_size,
+    const int B_batches,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const T* A,
+    const T* B,
+    const float beta,
+    T* C,
+    Context* context,
+    Tensor<Context>* scratch = nullptr,
+    TensorProto::DataType math_type = TensorProto_DataType_FLOAT);
 
 // Gemv always takes in a M*N matrix A, and depending on whether we set TransA
 // to Trans, the output is:
@@ -223,11 +287,17 @@ void Dot(const int N, const T* a, const T* b, T* y, Context* context);
 
 // Sum of vector x, and writes the result to a single value y.
 template <typename T, class Context>
-void Sum(const int N, const T* x, T* y, Context* context);
+void Sum(const int N, const T* x, T* y, Context* context,
+         Tensor<Context>* scratch_ptr = nullptr);
 
 // Sum of squares of vector x, and writes the result to a single value y.
 template <typename T, class Context>
-void SumSqr(const int N, const T* x, T* y, Context* context);
+void SumSqr(
+    const int N,
+    const T* x,
+    T* y,
+    Context* context,
+    Tensor<Context>* scratch_ptr = nullptr);
 
 // Select does index selection of the rows a N*D matrix x, and gives the N
 // dimensional vector y that contains the selected data.
@@ -345,6 +415,8 @@ template <class Context>
 void CopyMatrix(const size_t item_size, const int M, const int N, const void* A,
                 const int lda, void* B, const int ldb, Context* context);
 
+template <typename T, class Context>
+void CopyVector(const int N, const T* A, T* B, Context* context);
 
 uint32_t randomNumberSeed();
 
@@ -363,7 +435,7 @@ inline bool is_a_ge_zero_and_a_lt_b(int a, int b) {
 // Calculates ceil(a / b). User must be careful to ensure that there
 // is no overflow or underflow in the calculation.
 template <typename T>
-inline T divUp(T a, T b) {
+constexpr T divUp(T a, T b) {
   return (a + b - (T) 1) / b;
 }
 
@@ -371,10 +443,34 @@ inline T divUp(T a, T b) {
 // to ensure that there is no overflow or underflow in the calculation
 // of divUp.
 template <typename T>
-inline T roundUp(T a, T b) {
+constexpr T roundUp(T a, T b) {
   return divUp<T>(a, b) * b;
 }
 
+// Returns true if the given integer type is a power-of-2 (positive only)
+// Note(jiayq): windows reported an error per
+//     https://github.com/caffe2/caffe2/issues/997
+// and as a result will make it a macro.
+#ifdef _MSC_VER
+#define integerIsPowerOf2(v) ((v) && !((v) & ((v) - 1)))
+#else // _MSC_VER
+template <typename T>
+constexpr bool integerIsPowerOf2(T v) {
+  return (v && !(v & (v - 1)));
+}
+#endif // _MSC_VER
+
+// Returns log2(n) for a positive integer type
+template <typename T>
+constexpr int integerLog2(T n, int p = 0) {
+  return (n <= 1) ? p : integerLog2(n / 2, p + 1);
+}
+
+// Returns the next highest power-of-2 for an integer type
+template <typename T>
+constexpr T integerNextHighestPowerOf2(T v) {
+  return (integerIsPowerOf2(v) ? (T)2 * v : ((T)1 << (integerLog2(v) + 1)));
+}
 
 }  // namespace math
 }  // namespace caffe2

@@ -22,21 +22,35 @@
 
 namespace caffe2 {
 
+class NetBase;
+typedef ObserverBase<NetBase> NetObserver;
+typedef std::function<std::unique_ptr<NetObserver>(NetBase*)>
+    NetObserverCreator;
+
 class OperatorBase;
 class Workspace;
 // Net is a thin struct that owns all the operators together with the operator
 // contexts.
 class NetBase {
  public:
-  NetBase(const NetDef& net_def, Workspace* ws);
+  NetBase(const std::shared_ptr<const NetDef>& net_def, Workspace* ws);
   virtual ~NetBase() noexcept {}
-  virtual bool Run() = 0;
+  virtual bool RunAsync() = 0;
+  virtual bool SupportsAsync() = 0;
+  inline const vector<const Event*>& events() const {
+    return events_;
+  }
 
-  // RunAsync runs the net on the current stream, but potentially does
-  // not synchronize with respect to the host, and thus may require
-  // external synchronization (with respect to the current stream)
-  // after execution.
-  virtual bool RunAsync() { return Run(); }
+  inline bool Run() {
+    if (!RunAsync()) {
+      return false;
+    }
+    for (const Event* event : events_) {
+      event->Finish();
+    }
+    return true;
+  }
+
   /**
    * Benchmarks a network.
    *
@@ -47,9 +61,9 @@ class NetBase {
    * opeartor.
    */
   virtual vector<float> TEST_Benchmark(
-      const int warmup_runs,
-      const int main_runs,
-      const bool run_individual) {
+      const int /*warmup_runs*/,
+      const int /*main_runs*/,
+      const bool /*run_individual*/) {
     LOG(ERROR) << "Benchmark not implemented for this net type.";
     return vector<float>();
   }
@@ -62,14 +76,44 @@ class NetBase {
     return external_input_;
   }
 
+  /* Used to attach Observers to operators of a Net
+   *
+   * Returns pointers to objects owned with unique_ptrs.
+   * Use with caution.
+   */
+  virtual vector<OperatorBase*> GetOperators() const = 0;
+
+  void SetObserver(std::unique_ptr<NetObserver> observer) {
+    observer_ = std::move(observer);
+  }
+
+  void RemoveObserver() {
+    observer_ = nullptr;
+  }
+
+  NetObserver* GetObserver() {
+    return observer_.get();
+  }
+
+  const string& Name() const {
+    return name_;
+  }
+
  protected:
   vector<string> external_input_;
   vector<string> external_output_;
   string name_;
+  std::unique_ptr<NetObserver> observer_;
+  vector<const Event*> events_;
+
   DISABLE_COPY_AND_ASSIGN(NetBase);
 };
 
-CAFFE_DECLARE_REGISTRY(NetRegistry, NetBase, const NetDef&, Workspace*);
+CAFFE_DECLARE_REGISTRY(
+    NetRegistry,
+    NetBase,
+    const std::shared_ptr<const NetDef>&,
+    Workspace*);
 #define REGISTER_NET_CREATOR(key, ...) \
   CAFFE_REGISTER_CREATOR(NetRegistry, key, __VA_ARGS__)
 #define REGISTER_NET(name, ...) \
@@ -83,106 +127,11 @@ CAFFE_DECLARE_REGISTRY(NetRegistry, NetBase, const NetDef&, Workspace*);
  * a standalone net object.
  */
 unique_ptr<NetBase> CreateNet(const NetDef& net_def, Workspace* ws);
+unique_ptr<NetBase> CreateNet(
+    const std::shared_ptr<const NetDef>& net_def,
+    Workspace* ws);
 
-// This is the very basic structure you need to run a network - all it
-// does is simply to run everything in sequence. If you want more fancy control
-// such as a DAG-like execution, check out other better net implementations.
-class SimpleNet : public NetBase {
- public:
-  SimpleNet(const NetDef& net_def, Workspace* ws);
-  bool Run() override;
-  bool RunAsync() override;
-  vector<float> TEST_Benchmark(
-      const int warmup_runs,
-      const int main_runs,
-      const bool run_individual) override;
-
-  /*
-   * This returns a list of pointers to objects stored in unique_ptrs. Used to
-   * init Observers.
-   *
-   * Think carefully before using.
-   */
-  vector<OperatorBase*> getOperators() const {
-    vector<OperatorBase*> op_list;
-    for (auto& op : operators_) {
-      op_list.push_back(op.get());
-    }
-    return op_list;
-  }
-
-  void SetObserver(ObserverBase<SimpleNet>* observer) {
-    observer_ = observer;
-  }
-
-  void RemoveObserver() {
-    observer_ = nullptr;
-  }
-
- protected:
-  vector<unique_ptr<OperatorBase> > operators_;
-  ObserverBase<SimpleNet>* observer_ = nullptr;
-
-  DISABLE_COPY_AND_ASSIGN(SimpleNet);
-};
-
-namespace internal {
-struct OperatorNode {
-  unique_ptr<OperatorBase> operator_;
-  vector<int> children_;
-  vector<int> parents_;
-  std::atomic<int> runtime_parent_count_;
-  bool is_chain_start_ = false;
-};
-
-struct OpGraphNode {
-  vector<int> children_;
-  vector<int> parents_;
-  int visited_inputs = 0;
-  int num_orig_parents;
-};
-}
-
-class DAGNetBase : public NetBase {
- public:
-  using ExecutionChains = std::unordered_map<int, std::vector<int>>;
-  DAGNetBase(const NetDef& net_def, Workspace* ws);
-  ~DAGNetBase() override;
-  bool Run() override;
-  // WorkerFunction() is a function wrapper to allow us to run worker threads.
-  // It checks out one ready-to-run operator from the job queue, runs it,
-  // notifies all its children, and for any children that is ready, enqueues
-  // it to the job queue.
-  void WorkerFunction();
-  vector<float> TEST_Benchmark(
-      const int warmup_runs,
-      const int main_runs,
-      const bool run_individual) override;
-
-  const ExecutionChains& TEST_execution_chains() const {
-    return execution_chains_;
-  }
-
- protected:
-  virtual bool RunAt(const std::vector<int>& chain) = 0;
-
-  vector<internal::OperatorNode> operator_nodes_;
-  ExecutionChains execution_chains_;
-  vector<int> initial_frontier_;
-  std::unique_ptr<SimpleQueue<int>> job_queue_;
-  std::vector<std::thread> workers_;
-  int num_workers_;
-  int num_workers_first_iteration_;
-  int remaining_ops_;
-
-  bool success_;
-  int iter_;
-  std::mutex remaining_ops_mutex_;
-  std::condition_variable cv_;
-  std::mutex run_in_progress_;
-
-  DISABLE_COPY_AND_ASSIGN(DAGNetBase);
-};
+void SetGlobalNetObserverCreator(NetObserverCreator creator);
 
 }  // namespace caffe2
 

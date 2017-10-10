@@ -1,11 +1,13 @@
 #include "caffe2/core/context_gpu.h"
 #include "caffe2/operators/reduction_ops.h"
+#include "caffe2/utils/conversions.h"
+
+#include <cub/cub.cuh>
 
 namespace caffe2 {
-namespace {
 
 REGISTER_CUDA_OPERATOR(SumElements, SumElementsOp<float, CUDAContext>);
-REGISTER_CUDA_OPERATOR(SumSqrElements, SumSqrElementsOp<float, CUDAContext>);
+REGISTER_CUDA_OPERATOR(SumSqrElements, SumSqrElementsOp<CUDAContext>);
 REGISTER_CUDA_OPERATOR(RowwiseMax, MaxReductionOp<float, CUDAContext, true>);
 REGISTER_CUDA_OPERATOR(ColwiseMax, MaxReductionOp<float, CUDAContext, false>);
 REGISTER_CUDA_OPERATOR(
@@ -49,6 +51,12 @@ __global__ void rowwise_max_gradient_kernel(
   }
 }
 
+template <>
+bool SumSqrElementsOp<CUDAContext>::RunOnDevice() {
+  return DispatchHelper<TensorTypes<float, float16>>::call(this, Input(0));
+}
+
+
 __global__ void colwise_max_gradient_kernel(
     const int batch_size,
     const int M,
@@ -69,7 +77,6 @@ __global__ void colwise_max_gradient_kernel(
     }
   }
 }
-} // namespace
 
 template <>
 bool SumElementsGradientOp<float, CUDAContext>::RunOnDevice() {

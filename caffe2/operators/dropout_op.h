@@ -15,9 +15,10 @@ class DropoutOp final : public Operator<Context> {
   DropoutOp(const OperatorDef& operator_def, Workspace* ws)
       : Operator<Context>(operator_def, ws),
         ratio_(OperatorBase::GetSingleArgument<float>("ratio", 0.5)),
-        is_test_(OperatorBase::GetSingleArgument<int>("is_test", 0)) {
-    DCHECK_GE(ratio_, 0);
-    DCHECK_LT(ratio_, 1);
+        is_test_(
+            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)) {
+    CAFFE_ENFORCE_GE(ratio_, 0);
+    CAFFE_ENFORCE_LT(ratio_, 1);
   }
 
   bool RunOnDevice() override;
@@ -35,9 +36,10 @@ class DropoutGradientOp final : public Operator<Context> {
   DropoutGradientOp(const OperatorDef& operator_def, Workspace* ws)
       : Operator<Context>(operator_def, ws),
         ratio_(OperatorBase::GetSingleArgument<float>("ratio", 0.5)),
-        is_test_(OperatorBase::GetSingleArgument<int>("is_test", 0)) {
-    DCHECK_GE(ratio_, 0);
-    DCHECK_LT(ratio_, 1);
+        is_test_(
+            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)) {
+    CAFFE_ENFORCE_GE(ratio_, 0);
+    CAFFE_ENFORCE_LT(ratio_, 1);
   }
 
   bool RunOnDevice() override;

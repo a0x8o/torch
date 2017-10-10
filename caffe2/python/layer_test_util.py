@@ -80,13 +80,15 @@ class LayersTestCase(test_util.TestCase):
         workspace.RunNetOnce(train_init_net)
         workspace.RunNetOnce(train_net)
 
-    def run_train_net_forward_only(self):
+    def run_train_net_forward_only(self, num_iter=1):
         self.model.output_schema = schema.Struct()
         train_init_net, train_net = \
             layer_model_instantiator.generate_training_nets_forward_only(
                 self.model)
         workspace.RunNetOnce(train_init_net)
-        workspace.RunNetOnce(train_net)
+        assert num_iter > 0, 'num_iter must be larger than 0'
+        workspace.CreateNet(train_net)
+        workspace.RunNet(train_net.Proto().name, num_iter=num_iter)
 
     def assertBlobsEqual(self, spec_blobs, op_blobs):
         """
@@ -104,10 +106,13 @@ class LayersTestCase(test_util.TestCase):
 
     def assertArgsEqual(self, spec_args, op_args):
         self.assertEqual(len(spec_args), len(op_args))
+        keys = [a.name for a in op_args]
 
         def parse_args(args):
             operator = caffe2_pb2.OperatorDef()
-            for k, v in args.items():
+            # Generate the expected value in the same order
+            for k in keys:
+                v = args[k]
                 arg = utils.MakeArgument(k, v)
                 operator.arg.add().CopyFrom(arg)
             return operator.arg

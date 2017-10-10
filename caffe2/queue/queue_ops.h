@@ -12,7 +12,9 @@ class CreateBlobsQueueOp final : public Operator<Context> {
   USE_OPERATOR_CONTEXT_FUNCTIONS;
 
   CreateBlobsQueueOp(const OperatorDef& operator_def, Workspace* ws)
-      : Operator<Context>(operator_def, ws), ws_(ws) {}
+      : Operator<Context>(operator_def, ws),
+        ws_(ws),
+        name(operator_def.output().Get(0)) {}
 
   bool RunOnDevice() override {
     const auto capacity =
@@ -24,8 +26,7 @@ class CreateBlobsQueueOp final : public Operator<Context> {
             "enforce_unique_name", false);
     const auto fieldNames =
         OperatorBase::template GetRepeatedArgument<std::string>("field_names");
-    CAFFE_ENFORCE_EQ(def().output().size(), 1);
-    const auto name = def().output().Get(0);
+    CAFFE_ENFORCE_EQ(this->OutputSize(), 1);
     auto queuePtr = Operator<Context>::Outputs()[0]
                         ->template GetMutable<std::shared_ptr<BlobsQueue>>();
     CAFFE_ENFORCE(queuePtr);
@@ -36,6 +37,7 @@ class CreateBlobsQueueOp final : public Operator<Context> {
 
  private:
   Workspace* ws_{nullptr};
+  const std::string name;
 };
 
 template <typename Context>
@@ -58,16 +60,22 @@ template <typename Context>
 class DequeueBlobsOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
-  using Operator<Context>::Operator;
+
+  DequeueBlobsOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator<Context>(operator_def, ws) {
+    timeout_secs_ = OperatorBase::GetSingleArgument<float>("timeout_secs", 0);
+  }
+
   bool RunOnDevice() override {
     CAFFE_ENFORCE(InputSize() == 1);
     auto queue =
         OperatorBase::Inputs()[0]->template Get<std::shared_ptr<BlobsQueue>>();
     CAFFE_ENFORCE(queue && OutputSize() == queue->getNumBlobs());
-    return queue->blockingRead(this->Outputs());
+    return queue->blockingRead(this->Outputs(), timeout_secs_);
   }
 
  private:
+  float timeout_secs_;
 };
 
 template <typename Context>
@@ -114,14 +122,63 @@ class SafeDequeueBlobsOp final : public Operator<Context> {
  public:
   USE_OPERATOR_CONTEXT_FUNCTIONS;
   using Operator<Context>::Operator;
+
+  SafeDequeueBlobsOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator<Context>(operator_def, ws),
+        numRecords_(OperatorBase::GetSingleArgument<int>("num_records", 1)) {
+    CAFFE_ENFORCE_GT(numRecords_, 0);
+  }
+
+  bool dequeueMany(std::shared_ptr<BlobsQueue>& queue) {
+    auto size = queue->getNumBlobs();
+
+    if (blobs_.size() != size) {
+      blobs_.resize(size);
+      blobPtrs_.resize(size);
+      for (int col = 0; col < size; ++col) {
+        blobPtrs_.at(col) = &blobs_.at(col);
+      }
+    }
+
+    const int kTensorGrowthPct = 40;
+    for (int i = 0; i < numRecords_; ++i) {
+      if (!queue->blockingRead(blobPtrs_)) {
+        // if we read at least one record, status is still true
+        return i > 0;
+      }
+      for (int col = 0; col < size; ++col) {
+        auto* out = this->Output(col);
+        const auto& in = blobPtrs_.at(col)->template Get<Tensor<Context>>();
+        if (i == 0) {
+          out->CopyFrom(in);
+        } else {
+          auto oldSize = out->size();
+          out->Extend(in.dims()[0], kTensorGrowthPct, &context_);
+          auto* dst =
+              (char*)out->raw_mutable_data() + oldSize * in.meta().itemsize();
+          context_.template CopyItems<Context, Context>(
+              in.meta(), in.size(), in.raw_data(), dst);
+        }
+      }
+    }
+    return true;
+  }
+
+  bool dequeueOne(std::shared_ptr<BlobsQueue>& queue) {
+    return queue->blockingRead(this->Outputs());
+  }
+
   bool RunOnDevice() override {
     CAFFE_ENFORCE(InputSize() == 1);
     auto queue = Operator<Context>::Inputs()[0]
                      ->template Get<std::shared_ptr<BlobsQueue>>();
     CAFFE_ENFORCE(queue);
+
     auto size = queue->getNumBlobs();
     CAFFE_ENFORCE_EQ(OutputSize(), size + 1);
-    bool status = queue->blockingRead(this->Outputs());
+
+    bool status = numRecords_ > 1 ? dequeueMany(queue) : dequeueOne(queue);
+
     Output(size)->Resize();
     math::Set<bool, Context>(
         1, !status, Output(size)->template mutable_data<bool>(), &context_);
@@ -129,6 +186,9 @@ class SafeDequeueBlobsOp final : public Operator<Context> {
   }
 
  private:
+  int numRecords_;
+  std::vector<Blob> blobs_;
+  std::vector<Blob*> blobPtrs_;
 };
 
 template <typename Context>

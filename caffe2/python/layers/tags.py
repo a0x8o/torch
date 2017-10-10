@@ -5,6 +5,8 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import six
+
 from caffe2.python import context
 
 
@@ -36,6 +38,8 @@ class Tags(object):
     PREPROCESSING = 'preprocessing'
     HANDLE_AS_SPARSE_LAYER = 'handle_as_sparse_layer'
     GRADIENT_FROM_PS = 'gradient_from_ps'
+    PREFER_GPU = 'prefer_gpu'
+    CPU_ONLY = 'cpu_only'
 
     # In certain cases we want to have different schema for training and
     # prediction, as an example in prediction we might need to have only
@@ -55,6 +59,13 @@ class Tags(object):
 
     def __exit__(self, type, value, traceback):
         TagContext.current().remove_tags(self.tags)
+
+    def __call__(self, func):
+        @six.wraps(func)
+        def wrapper(*args, **kwargs):
+            with self:
+                return func(*args, **kwargs)
+        return wrapper
 
 
 Tags.TRAIN_ONLY = [Tags.EXCLUDE_FROM_PREDICTION, Tags.EXCLUDE_FROM_EVAL,

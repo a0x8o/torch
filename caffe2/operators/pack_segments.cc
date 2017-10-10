@@ -2,8 +2,6 @@
 
 namespace caffe2 {
 
-namespace {
-
 REGISTER_CPU_OPERATOR(PackSegments, PackSegmentsOp<CPUContext>);
 REGISTER_CPU_OPERATOR(UnpackSegments, UnpackSegmentsOp<CPUContext>);
 
@@ -21,7 +19,7 @@ OPERATOR_SCHEMA(PackSegments)
     .Output(
         0,
         "packed_tensor",
-        "N + 1 dim Tesor"
+        "N + 1 dim Tensor"
         "where dim(1) is the max length"
         ", dim(0) is the batch size.")
     .Arg(
@@ -36,7 +34,7 @@ OPERATOR_SCHEMA(UnpackSegments)
         "lengths",
         "1-d int/long tensor contains the length in each of the input.")
     .Input(1, "tensor", "N+1 dim Tensor.")
-    .Output(0, "packed_tensor", "N dim Tesor");
+    .Output(0, "packed_tensor", "N dim Tensor");
 
 class GetPackSegmentsGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
@@ -45,8 +43,7 @@ class GetPackSegmentsGradient : public GradientMakerBase {
         "UnpackSegments",
         "",
         vector<string>{I(0), GO(0)},
-        vector<string>{GI(1)},
-        Def().arg());
+        vector<string>{GI(1)});
   }
 };
 REGISTER_GRADIENT(PackSegments, GetPackSegmentsGradient);
@@ -55,13 +52,8 @@ class GetUnpackSegmentsGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
   vector<OperatorDef> GetGradientDefs() override {
     return SingleGradientDef(
-        "PackSegments",
-        "",
-        vector<string>{I(0), GO(0)},
-        vector<string>{GI(1)},
-        Def().arg());
+        "PackSegments", "", vector<string>{I(0), GO(0)}, vector<string>{GI(1)});
   }
 };
 REGISTER_GRADIENT(UnpackSegments, GetUnpackSegmentsGradient);
-}
 } // namespace

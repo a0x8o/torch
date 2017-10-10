@@ -38,6 +38,9 @@ class ParameterInfo(object):
         # in different precisions (i.e. half and float copies)
         # stored as a dict of TensorProto.DataType -> BlobReference
         self.blob_copy = blob_copy
+        # each param_info can have its own optimizer. It can be set within
+        # OptimizerContext (caffe2/python/optimizer.py)
+        self._optimizer = None
 
     def grad_type(self):
         # self.grad could be None for model parallelism with parameter server
@@ -47,14 +50,18 @@ class ParameterInfo(object):
             ParameterType.SPARSE if isinstance(self.grad, core.GradientSlice)
             else ParameterType.DENSE)
 
-    def cloned_init_net(self):
-        if not self._cloned_init_net:
-            init_net, outputs = self.blob.Net().ClonePartial(
-                'param_%d_%s_init' % (self.param_id, self.name),
-                inputs=[],
-                outputs=[self.blob])
-            self._cloned_init_net = (init_net, outputs[0])
-        return self._cloned_init_net
+    @property
+    def parameter(self):
+        return self.blob
+
+    @property
+    def optimizer(self):
+        return self._optimizer
+
+    @optimizer.setter
+    def optimizer(self, value):
+        assert self._optimizer is None, "optimizer has already been set"
+        self._optimizer = value
 
     def __str__(self):
         return self.name
