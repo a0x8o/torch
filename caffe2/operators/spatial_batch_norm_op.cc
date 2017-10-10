@@ -21,10 +21,10 @@ bool SpatialBNOp<CPUContext>::RunOnDevice() {
       : 1;
 
   const int sample_size = H * W * D;
-  DCHECK_EQ(scale.ndim(), 1);
-  DCHECK_EQ(bias.ndim(), 1);
-  DCHECK_EQ(scale.dim32(0), C);
-  DCHECK_EQ(bias.dim32(0), C);
+  CAFFE_ENFORCE_EQ(scale.ndim(), 1);
+  CAFFE_ENFORCE_EQ(bias.ndim(), 1);
+  CAFFE_ENFORCE_EQ(scale.dim32(0), C);
+  CAFFE_ENFORCE_EQ(bias.dim32(0), C);
 
   ConstEigenVectorArrayMap<float> scale_arr(scale.data<float>(), C);
   ConstEigenVectorArrayMap<float> bias_arr(bias.data<float>(), C);
@@ -156,11 +156,12 @@ REGISTER_CPU_OPERATOR(SpatialBN, SpatialBNOp<CPUContext>);
 OPERATOR_SCHEMA(SpatialBN)
     .NumInputs(5)
     .NumOutputs({1, 5})
+    .AllowInplace({{0, 0}})
     .EnforceInplace({{3, 1}, {4, 2}})
     .TensorInferenceFunction(
         [](const OperatorDef& def, const vector<TensorShape>& in) {
           ArgumentHelper helper(def);
-          bool is_test = helper.GetSingleArgument<int>("is_test", 0);
+          bool is_test = helper.GetSingleArgument<int>(OpSchema::Arg_IsTest, 0);
 
           if (!is_test) {
             vector<TensorShape> out;
@@ -185,15 +186,14 @@ OPERATOR_SCHEMA(SpatialBN)
         })
     .SetDoc(R"DOC(
 Carries out spatial batch normalization as described in the paper
-https://arxiv.org/abs/1502.03167. Depending on the mode it is being run,
+https://arxiv.org/abs/1502.03167 . Depending on the mode it is being run,
 there are multiple cases for the number of outputs, which we list below:
 
 Output case #1: Y, mean, var, saved_mean, saved_var
                 (training mode)
 Output case #2: Y (test mode)
 )DOC")
-    .Arg(
-        "is_test",
+    .ArgIsTest(
         "If set to nonzero, run spatial batch normalization in test mode.")
     .Arg("epsilon", "The epsilon value to use to avoid division by zero.")
     .Arg("order", "A StorageOrder string.")

@@ -7,6 +7,7 @@ from __future__ import unicode_literals
 
 from collections import namedtuple
 from caffe2.python import core
+import caffe2.python.models.seq2seq.seq2seq_util as seq2seq_util
 from caffe2.python.models.seq2seq.seq2seq_model_helper import Seq2SeqModelHelper
 
 
@@ -36,7 +37,13 @@ class BeamSearchForwardOnly(object):
         ['initial_value', 'state_prev_link', 'state_link'],
     )
 
-    def __init__(self, beam_size, model, go_token_id, eos_token_id):
+    def __init__(
+        self,
+        beam_size,
+        model,
+        eos_token_id,
+        go_token_id=seq2seq_util.GO_ID,
+    ):
         self.beam_size = beam_size
         self.model = model
         self.step_model = Seq2SeqModelHelper(
@@ -80,6 +87,9 @@ class BeamSearchForwardOnly(object):
         return self.timestep
 
     # TODO: make attentions a generic state
+    # data_dependencies is a list of blobs that the operator should wait for
+    # before beginning execution. This ensures that ops are run in the correct
+    # order when the RecurrentNetwork op is embedded in a DAGNet, for ex.
     def apply(
         self,
         inputs,
@@ -87,8 +97,10 @@ class BeamSearchForwardOnly(object):
         log_probs,
         attentions,
         state_configs,
+        data_dependencies,
         word_rewards=None,
         possible_translation_tokens=None,
+        go_token_id=None,
     ):
         # [beam_size, beam_size]
         best_scores_per_hypo, best_tokens_per_hypo = self.step_model.net.TopK(
@@ -219,7 +231,7 @@ class BeamSearchForwardOnly(object):
                 state_config.state_link.blob,
                 [
                     state_config.state_link.blob,
-                    'state_old_shape_before_choosing_per_hypo',
+                    state_config.state_link.blob + '_old_shape',
                 ],
                 shape=[self.beam_size, -1],
             )
@@ -244,13 +256,20 @@ class BeamSearchForwardOnly(object):
             value=0.0,
             dtype=core.DataType.FLOAT,
         )
-        initial_tokens = self.model.param_init_net.ConstantFill(
-            [],
-            'initial_tokens',
-            shape=[1],
-            value=float(self.go_token_id),
-            dtype=core.DataType.FLOAT,
-        )
+        if go_token_id:
+            initial_tokens = self.model.net.Copy(
+                [go_token_id],
+                'initial_tokens',
+            )
+        else:
+            initial_tokens = self.model.param_init_net.ConstantFill(
+                [],
+                'initial_tokens',
+                shape=[1],
+                value=float(self.go_token_id),
+                dtype=core.DataType.FLOAT,
+            )
+
         initial_hypo = self.model.param_init_net.ConstantFill(
             [],
             'initial_hypo',
@@ -302,7 +321,8 @@ class BeamSearchForwardOnly(object):
         all_inputs = (
             [fake_input] +
             self.step_model.params +
-            [state_config.initial_value for state_config in state_configs]
+            [state_config.initial_value for state_config in state_configs] +
+            data_dependencies
         )
         forward_links = []
         recurrent_states = []
@@ -359,6 +379,7 @@ class BeamSearchForwardOnly(object):
             backward_step_net='',
             timestep=str(self.timestep),
             outputs_with_grads=[],
+            enable_rnn_executor=1,
         )
         score_t_all, tokens_t_all, hypo_t_all, attention_t_all = results[:4]
 

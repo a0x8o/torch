@@ -14,14 +14,18 @@ log = logging.getLogger("parallelize_gpu_bmuf_distributed_test")
 log.setLevel(logging.INFO)
 
 
-def bmuf_process(filestore_dir, process_id, shared_results):
+def bmuf_process(filestore_dir, process_id, shared_results, nesterov=False):
     # We need to import caffe2 in every process to initialize CUDA independently.
     from caffe2.python import core, cnn, data_parallel_model, workspace, dyndep
     from caffe2.proto import caffe2_pb2
     dyndep.InitOpsLibrary("@/caffe2/caffe2/distributed:file_store_handler_ops")
 
-    if not workspace.has_gpu_support or workspace.NumCudaDevices() < 2:
+    if not workspace.has_gpu_support:
         log.info('No GPU support test is Ignored.')
+        return
+
+    if workspace.NumCudaDevices() < 4:
+        log.info('Not enough GPU support, test IGNORED')
         return
 
     model = cnn.CNNModelHelper(
@@ -40,6 +44,9 @@ def bmuf_process(filestore_dir, process_id, shared_results):
         sq = model.SquaredL2Distance([sigm, "label"], "sq")
         loss = model.AveragedLoss(sq, "loss")
         loss = model.Scale(loss, scale=loss_scale)
+
+        # For testing explicit sync
+        model.param_init_net.UniformFill([], ["sync_num"], shape=[1])
         return [loss]
 
     def _input_builder_fun(model):
@@ -100,7 +107,9 @@ def bmuf_process(filestore_dir, process_id, shared_results):
         _model_build_fun,
         _param_update_fun,
         devices=gpu_ids,
-        rendezvous=rendezvous
+        rendezvous=rendezvous,
+        nesterov=nesterov,
+        add_blobs_to_sync=["sync_num"],
     )
 
     data_parallel_model.RunInitNet(model)
@@ -138,6 +147,13 @@ def bmuf_process(filestore_dir, process_id, shared_results):
     results['b_1_'] = b_1_
     results['w_1_'] = w_1_
 
+    # Test sync
+    if process_id == 0:
+        workspace.FeedBlob(
+            model._device_prefix + "_0/sync_num",
+            np.array([2603]).astype(np.float32),
+            device_option=core.DeviceOption(model._device_type, 0))
+
     # Compute block gradients.
     b_g_ = workspace.FetchBlob("gpu_{}/fc_b_g".format(_gpu_pid(0, process_id)))
     w_g_ = workspace.FetchBlob("gpu_{}/fc_w_g".format(_gpu_pid(0, process_id)))
@@ -164,19 +180,31 @@ def bmuf_process(filestore_dir, process_id, shared_results):
     results['w_1'] = w_1
     results['b_1'] = b_1
 
+    # Test add_blobs_to_sync
+    for j in model._devices:
+        sync = workspace.FetchBlob(
+            model._device_prefix + "_{}/sync_num".format(j))[0]
+        results['sync_{}'.format(j)] = sync
+
     shared_results[process_id] = results
 
 
-class DistrubitedTest(unittest.TestCase):
+class DistributedTest(unittest.TestCase):
 
     def test_bmuf_distributed(self):
+        self._test_bmuf_distributed()
+
+    def test_bmuf_distributed_nesterov(self):
+        self._test_bmuf_distributed(nesterov=True)
+
+    def _test_bmuf_distributed(self, nesterov=False):
         processes = []
         filestore_dir = tempfile.mkdtemp()
         results = Manager().dict()
         for idx in range(0, 2):
             process = Process(
                 target=bmuf_process,
-                args=(filestore_dir, idx, results)
+                args=(filestore_dir, idx, results, nesterov)
             )
             processes.append(process)
             process.start()
@@ -213,10 +241,19 @@ class DistrubitedTest(unittest.TestCase):
         v_w_ = results[0]['v_w_']
         v_w = results[0]['v_w']
 
+        for pid in results.keys():
+            for k in results[pid].keys():
+                if k.startswith("sync_num"):
+                    self.assertEqual(2603, results[pid][k])
+
         # Check block gradients are correct.
         np.testing.assert_almost_equal(v_b, 0.75 * v_b_ + g_b)
         np.testing.assert_almost_equal(v_w, 0.75 * v_w_ + g_w)
 
         # Check params update step
-        np.testing.assert_equal(w_0, w_g_ + v_w)
-        np.testing.assert_equal(b_0, b_g_ + v_b)
+        if nesterov:
+            np.testing.assert_equal(w_0, w_g_ + v_w - 0.75 * (v_w - v_w_))
+            np.testing.assert_equal(b_0, b_g_ + v_b - 0.75 * (v_b - v_b_))
+        else:
+            np.testing.assert_equal(w_0, w_g_ + v_w)
+            np.testing.assert_equal(b_0, b_g_ + v_b)

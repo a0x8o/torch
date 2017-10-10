@@ -23,19 +23,20 @@ import numpy as np
 
 
 class _DatasetReader(Reader):
-    def __init__(self, dataset, name, batch_size=1):
+    def __init__(self, dataset, name, batch_size=1, enforce_batch_size=False):
         """Don't call this directly. Instead, use dataset.reader()"""
         Reader.__init__(self, dataset.content())
         self.dataset = dataset
         self.name = name or (dataset.name + '_cursor')
         self.batch_size = batch_size
+        self.enforce_batch_size = enforce_batch_size
         self.cursor = None
 
     def setup_ex(self, init_net, exit_net):
         if self.cursor is None:
             self.cursor = init_net.CreateTreeCursor(
                 [],
-                [self.name],
+                init_net.NextScopedBlob(self.name),
                 fields=self.dataset.fields)
 
     def read(self, read_net):
@@ -45,7 +46,8 @@ class _DatasetReader(Reader):
             fields = read_net.ReadNextBatch(
                 [self.cursor] + content.field_blobs(),
                 content.field_names(),
-                batch_size=self.batch_size)
+                batch_size=self.batch_size,
+                enforce_batch_size=self.enforce_batch_size)
             if type(fields) is core.BlobReference:
                 fields = [fields]
             return (read_net.IsEmpty([fields[0]]), fields)
@@ -55,7 +57,8 @@ class _DatasetReader(Reader):
 
 
 class _DatasetRandomReader(Reader):
-    def __init__(self, dataset, name, indices, batch_size=1, loop_over=False):
+    def __init__(self, dataset, name, indices, batch_size=1, loop_over=False,
+                 enforce_batch_size=False):
         """Don't call this directly. Instead, use dataset.random_reader()"""
         Reader.__init__(self, dataset.content())
         self.dataset = dataset
@@ -64,6 +67,7 @@ class _DatasetRandomReader(Reader):
         self.indices = indices
         self.batch_size = batch_size
         self.loop_over = loop_over
+        self.enforce_batch_size = enforce_batch_size
 
     def setup_ex(self, init_net, exit_net):
         if self.cursor is None:
@@ -108,6 +112,7 @@ class _DatasetRandomReader(Reader):
                     self.dataset.content().field_blobs()),
                 self.dataset.content().field_names(),
                 batch_size=self.batch_size,
+                enforce_batch_size=self.enforce_batch_size,
                 loop_over=self.loop_over)
             return (read_net.IsEmpty([fields[0]]), fields)
 
@@ -205,6 +210,17 @@ class Dataset(object):
         self.name = name or 'dataset'
         self.field_blobs = fields.field_blobs() if fields.has_blobs() else None
 
+    def trim(self, net, multiple_of):
+        """
+        Trims the contents of this dataset so that the number of records is
+        multiple of the given argument.
+        """
+        net.TrimDataset(
+            self.field_blobs,
+            self.field_blobs,
+            fields=self.fields,
+            multiple_of=multiple_of)
+
     def init_empty(self, init_net):
         """Initialize the blobs for this dataset with empty values.
 
@@ -253,7 +269,8 @@ class Dataset(object):
         """
         return self.field_types
 
-    def reader(self, init_net=None, cursor_name=None, batch_size=1):
+    def reader(self, init_net=None, cursor_name=None, batch_size=1,
+               enforce_batch_size=False):
         """Create a Reader object that is used to iterate through the dataset.
 
         This will append operations to `init_net` that create a TreeCursor,
@@ -272,13 +289,14 @@ class Dataset(object):
             iterate through the dataset.
         """
         assert self.field_blobs, 'Dataset not initialized.'
-        reader = _DatasetReader(self, cursor_name, batch_size)
+        reader = _DatasetReader(self, cursor_name, batch_size,
+                                enforce_batch_size)
         if init_net is not None:
             reader.setup_ex(init_net, None)
         return reader
 
     def random_reader(self, init_net=None, indices=None, cursor_name=None,
-                      batch_size=1, loop_over=False):
+                      batch_size=1, loop_over=False, enforce_batch_size=False):
         """Create a Reader object that is used to iterate through the dataset.
 
         NOTE: The reader order depends on the order in indices.
@@ -297,7 +315,8 @@ class Dataset(object):
         """
         assert self.field_blobs, 'Dataset not initialized.'
         reader = _DatasetRandomReader(
-            self, cursor_name, indices, batch_size, loop_over)
+            self, cursor_name, indices, batch_size, loop_over,
+            enforce_batch_size)
         if init_net is not None:
             reader.setup_ex(init_net, None)
         return reader

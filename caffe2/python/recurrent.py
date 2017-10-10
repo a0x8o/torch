@@ -5,7 +5,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from caffe2.python import core
+from caffe2.python import core, workspace
 from caffe2.python.scope import CurrentNameScope
 from future.utils import viewitems, viewkeys
 
@@ -129,7 +129,7 @@ def recurrent_net(
         x[1] for x in initial_cell_inputs] + references
     all_outputs = []
 
-    cell_net.Proto().type = 'rnn'
+    cell_net.Proto().type = 'simple'
 
     # Internal arguments used by RecurrentNetwork operator
 
@@ -179,7 +179,8 @@ def recurrent_net(
                 backward_links.append(
                     (backward_mapping[cell_input], states_grad, 0))
             else:
-                backward_links.append((cell_input + "_grad", states_grad, 0))
+                backward_links.append((recurrent_input_grad, states_grad, 0))
+
 
     for input_t, input_blob in inputs:
         forward_links.append((str(input_t), str(input_blob), 0))
@@ -235,9 +236,13 @@ def recurrent_net(
                         [output_blob],
                     )
 
+    def map_to_dual_list(m):
+        return [str(x) for x in list(m.keys())] + \
+               [str(x) for x in list(m.values())]
+
     backward_args = {}
-    backward_mapping_keys = set(viewkeys(backward_mapping))
     if backward_cell_net is not None:
+        backward_mapping_keys = set(viewkeys(backward_mapping))
         backward_link_internal, backward_link_external, backward_link_offset = \
             unpack_triple(backward_links)
         params = [x for x in references if x in backward_mapping_keys]
@@ -274,6 +279,7 @@ def recurrent_net(
         link_internal=[str(l) for l in link_internal],
         link_external=[str(l) for l in link_external],
         link_offset=link_offset,
+        enable_rnn_executor=1,
         step_net=str(cell_net.Proto()),
         timestep="timestep" if timestep is None else str(timestep),
         **backward_args
@@ -285,3 +291,50 @@ def recurrent_net(
     # The last output is a list of step workspaces,
     # which is only needed internally for gradient propogation
     return results[:-1]
+
+
+def set_rnn_executor_config(rnn_op, num_threads=None, max_cuda_streams=None):
+    from caffe2.proto import caffe2_pb2
+    assert rnn_op.type in {'RecurrentNetwork', 'RecurrentNetworkGradient'}
+
+    def add_arg(s, v):
+        a = caffe2_pb2.Argument()
+        a.name = "rnn_executor." + s
+        a.i = v
+        rnn_op.arg.extend([a])
+
+    if num_threads is not None:
+        add_arg('num_threads', num_threads)
+    if max_cuda_streams is not None:
+        add_arg('max_cuda_streams', max_cuda_streams)
+
+
+def retrieve_step_blobs(net, prefix='rnn'):
+    '''
+    Retrieves blobs from step workspaces (which contain intermediate recurrent
+    network computation for each timestep) and puts them in the global
+    workspace. This allows access to the contents of this intermediate
+    computation in python. Returns the list of extracted blob names.
+
+    net: the net from which the step workspace blobs should be extracted
+
+    prefix: prefix to append to extracted blob names when placing them in the
+    global workspace
+    '''
+    count = 1
+    output_list = []
+    for op in net.Proto().op:
+        if op.type == "RecurrentNetwork":
+            blob_name = prefix + "_" + str(count)
+            count = count + 1
+            scratch_workspaces_blob_name = op.output[-1]
+            workspace.RunOperatorOnce(
+                core.CreateOperator(
+                    "RecurrentNetworkBlobFetcher",
+                    [scratch_workspaces_blob_name],
+                    [blob_name],
+                    prefix=prefix
+                )
+            )
+            output_list += workspace.FetchBlob(blob_name).tolist()
+    return output_list

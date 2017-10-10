@@ -11,7 +11,6 @@ struct SqrCPUFunctor {
   }
 };
 
-namespace {
 REGISTER_CPU_OPERATOR(
     Sqr,
     UnaryElementwiseOp<TensorTypes<float>, CPUContext, SqrCPUFunctor>);
@@ -45,6 +44,27 @@ class GetSqrGradient : public GradientMakerBase {
   }
 };
 REGISTER_GRADIENT(Sqr, GetSqrGradient);
+
+struct SignCPUFunctor {
+  template <typename T>
+  inline void
+  operator()(const int n, const T* x, T* y, CPUContext* device_context) {
+    for (int i = 0; i < n; ++i) {
+      y[i] = (-T(1) * (x[i] < 0)) + (x[i] > 0);
+    }
+  }
+};
+
+REGISTER_CPU_OPERATOR(
+    Sign,
+    UnaryElementwiseOp<TensorTypes<float>, CPUContext, SignCPUFunctor>);
+
+OPERATOR_SCHEMA(Sign)
+    .NumInputs(1)
+    .NumOutputs(1)
+    .SetDoc("Computes sign for each element of the input: -1, 0 or 1.")
+    .IdenticalTypeAndShape();
+SHOULD_NOT_DO_GRADIENT(Sign);
 
 REGISTER_CPU_OPERATOR(
     Pow,
@@ -100,5 +120,4 @@ class GetPowGradient : public GradientMakerBase {
 
 REGISTER_GRADIENT(Pow, GetPowGradient);
 
-} // namespace
 } // namespace caffe2

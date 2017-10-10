@@ -1,10 +1,9 @@
 #include "caffe2/operators/reduction_ops.h"
 
 namespace caffe2 {
-namespace {
 
 REGISTER_CPU_OPERATOR(SumElements, SumElementsOp<float, CPUContext>);
-REGISTER_CPU_OPERATOR(SumSqrElements, SumSqrElementsOp<float, CPUContext>);
+REGISTER_CPU_OPERATOR(SumSqrElements, SumSqrElementsOp<CPUContext>);
 
 REGISTER_CPU_OPERATOR(
     SumElementsGradient,
@@ -74,6 +73,8 @@ class GetRowwiseMaxGradient : public GradientMakerBase {
 };
 REGISTER_GRADIENT(RowwiseMax, GetRowwiseMaxGradient);
 
+OPERATOR_SCHEMA(ColwiseMaxGradient);
+
 OPERATOR_SCHEMA(ColwiseMax)
     .NumInputs(1)
     .NumOutputs(1)
@@ -96,10 +97,16 @@ class GetColwiseMaxGradient : public GradientMakerBase {
   }
 };
 REGISTER_GRADIENT(ColwiseMax, GetColwiseMaxGradient);
-} // namespace
 
 template <typename T, class Context>
-bool SumElementsGradientOp<T, Context>::RunOnDevice() {
+bool SumElementsGradientOp<T, Context>::RunOnDevice()
+// TODO: T21635077 fix float-divide-by-zero undefined behavior
+#if defined(__has_feature)
+#if __has_feature(__address_sanitizer__)
+    __attribute__((__no_sanitize__("float-divide-by-zero")))
+#endif
+#endif
+{
   auto& X = Input(0);
   TensorCPU sum_grad = TensorCPU(Input(1));
   auto* dX = Output(0);

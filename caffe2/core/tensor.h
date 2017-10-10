@@ -64,7 +64,6 @@ inline int canonical_axis_index_(int axis_index, int ndims) {
   return axis_index;
 }
 
-
 /**
  * @brief Tensor is the basic class in Caffe2 that stores a contiguous memory
  * with its shape information.
@@ -356,6 +355,16 @@ class Tensor {
     return ss.str();
   }
 
+  void swap(Tensor<Context>& other) {
+    std::swap(dims_, other.dims_);
+    std::swap(size_, other.size_);
+    std::swap(meta_, other.meta_);
+    std::swap(data_, other.data_);
+    std::swap(shares_data_, other.shares_data_);
+    std::swap(capacity_, other.capacity_);
+    std::swap(reserved_, other.reserved_);
+  }
+
   /**
    * @brief Shares the data with another tensor.
    *
@@ -389,48 +398,39 @@ class Tensor {
   /**
    * @brief Shares the data with an externally managed pointer.
    *
-   * This is similar to ShareData() but the tensor does not take over ownership
-   * of the pointer, so the caller can explicitly manage the memory storage.
-   * One needs to make sure that the external memory is deallocated only after
-   * the tensor finishes using it.
+   * This is similar to ShareData() but the source is a pointer with an advanced
+   * deleter option. In default, no deletion takes place, and one needs to make
+   * sure that the external memory is deallocated only after the tensor finishes
+   * using it. If a Deleter object is passed in, when this tensor is reallocated
+   * or freed, the deleter function is going to be called.
    */
-  template <typename T>
-  void ShareExternalPointer(T* src, size_t capacity = 0) {
-    ShareExternalPointer(src, capacity, [](void*) -> void {});
+  template <typename T, typename Deleter = MemoryDeleter>
+  void ShareExternalPointer(T* src, size_t capacity = 0, Deleter d = nullptr) {
+    ShareExternalPointer(src, TypeMeta::Make<T>(), capacity, d);
   }
 
-  /**
-   * @brief Shares the data with an externally managed pointer.
-   *
-   * This overload takes a Deleter functor to be called when this tensor is
-   * reallocated or freed.
-   */
-  template <typename T, typename Deleter>
-  void ShareExternalPointer(T* src, size_t capacity, Deleter&& d) {
-    ShareExternalPointer(
-        src, TypeMeta::Make<T>(), capacity, std::forward<Deleter>(d));
-  }
-
-  void
-  ShareExternalPointer(void* src, const TypeMeta& meta, size_t capacity = 0) {
-    ShareExternalPointer(src, meta, capacity, [](void*) -> void {});
-  }
-
-  template <class Deleter>
+  template <typename Deleter = MemoryDeleter>
   void ShareExternalPointer(
       void* src,
       const TypeMeta& meta,
-      size_t capacity,
-      Deleter&& d) {
+      size_t capacity = 0,
+      Deleter d = nullptr) {
     meta_ = meta;
     CAFFE_ENFORCE_WITH_CALLER(
         meta_.id(),
         "To share with a raw external pointer you need to have meta "
         "already set.");
     CAFFE_ENFORCE_WITH_CALLER(
-        size_ > 0,
+        size_ >= 0,
         "To share data with a raw pointer, you need to set shape first.");
-    data_.reset(src, std::forward<Deleter>(d));
+    // Check if the deleter is a MemoryDeleter and is a simple nullptr.
+    if (std::is_same<MemoryDeleter, Deleter>::value &&
+        reinterpret_cast<MemoryDeleter*>(&d)[0] == nullptr) {
+      // Use aliasing constructor trick to avoid calling the destructor.
+      data_ = std::shared_ptr<void>(std::shared_ptr<void>(), src);
+    } else {
+      data_.reset(src, d);
+    }
     // Sets capacity. If not specified, we will implicitly assume that
     // the capacity is the current size.
     if (capacity) {
@@ -441,7 +441,7 @@ class Tensor {
     shares_data_ = true;
   }
 
-  bool shares_data() {
+  bool shares_data() const {
     return shares_data_;
   }
 
@@ -492,12 +492,19 @@ class Tensor {
     if (meta_ == meta && (data_.get() || size_ == 0)) {
       return data_.get();
     } else {
+      bool had_special_dtor = meta_.dtor() != nullptr;
       meta_ = meta;
       CAFFE_ENFORCE_WITH_CALLER(
           size_ >= 0,
           "Tensor is not initialized. You probably need to call Resize() "
           "before calling mutable_data()");
-      if (size_ == 0) {
+
+      // We can reuse the existing buffer if the current data does not have
+      // a special destructor and the new data doesn't have a special
+      // constructor.
+      if (size_ == 0 ||
+          (meta.ctor() == nullptr && !had_special_dtor &&
+           capacity_ >= size_ * meta_.itemsize())) {
         return data_.get();
       }
       if (meta.ctor()) {
@@ -506,17 +513,18 @@ class Tensor {
         // destruction procedure.
         auto size = size_;
         auto dtor = meta_.dtor();
+        auto ptr_and_deleter = Context::New(size_ * meta_.itemsize());
+        auto deleter = ptr_and_deleter.second;
         data_.reset(
-            static_cast<void*>(Context::New(size_ * meta_.itemsize())),
-            [size, dtor](void* ptr) -> void {
-                dtor(ptr, size);
-                Context::Delete(ptr);
+            ptr_and_deleter.first, [size, dtor, deleter](void* ptr) -> void {
+              dtor(ptr, size);
+              deleter(ptr);
             });
         meta_.ctor()(data_.get(), size_);
       } else {
         // For fundamental type, new and delete is easier.
-        data_.reset(static_cast<void*>(Context::New(size_ * meta_.itemsize())),
-                    Context::Delete);
+        auto ptr_and_deleter = Context::New(size_ * meta_.itemsize());
+        data_.reset(ptr_and_deleter.first, ptr_and_deleter.second);
       }
       capacity_ = size_ * meta_.itemsize();
       return data_.get();
@@ -543,16 +551,16 @@ class Tensor {
   /**
    * Returns a typed pointer of the underlying storage.
    *
-   * If the existing data does not match the desired type, it will be deleted
-   * and a new storage will be created.
+   * For fundamental types, we reuse possible existing storage if there
+   * is sufficient capacity.
    */
-  template <typename T>
-  inline T* mutable_data() {
-    if ((size_ == 0 || data_.get()) && IsType<T>()) {
-      return static_cast<T*>(data_.get());
+   template <typename T>
+    inline T* mutable_data() {
+      if ((size_ == 0 || data_.get()) && IsType<T>()) {
+        return static_cast<T*>(data_.get());
+      }
+      return static_cast<T*>(raw_mutable_data(TypeMeta::Make<T>()));
     }
-    return static_cast<T*>(raw_mutable_data(TypeMeta::Make<T>()));
-  }
 
 
   /**
@@ -730,19 +738,19 @@ typedef Tensor<CPUContext> TensorCPU;
 constexpr int k_limit_default_ = 1000;
 
 // Type call registry
-typedef TypeMeta (*TypeCall)(void*);
+typedef TypeMeta (*TypeCall)(const void*);
 TypeCall GetTypeCallFunction(CaffeTypeId id);
 void RegisterTypeCallFunction(CaffeTypeId id, TypeCall c);
 
 template <class Context>
-TypeMeta GetTensorType(void* c) {
-  Tensor<Context>* tc = static_cast<Tensor<Context>*>(c);
+TypeMeta GetTensorType(const void* c) {
+  const Tensor<Context>* tc = static_cast<const Tensor<Context>*>(c);
   return tc->meta();
 }
 
 // Shape call registry
 typedef vector<TIndex> (*TensorInfoCall)(
-    void*,
+    const void*,
     bool* shares_data,
     size_t* capacity,
     DeviceOption* device);
@@ -751,11 +759,11 @@ void RegisterTensorInfoFunction(CaffeTypeId id, TensorInfoCall c);
 
 template <class Context>
 vector<TIndex> GetTensorInfo(
-    void* c,
+    const void* c,
     bool* shares_data,
     size_t* capacity,
     DeviceOption* device) {
-  Tensor<Context>* tc = static_cast<Tensor<Context>*>(c);
+  const Tensor<Context>* tc = static_cast<const Tensor<Context>*>(c);
   *shares_data = tc->shares_data();
   *capacity = tc->capacity_nbytes();
   device->set_device_type(CPU);

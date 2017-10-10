@@ -15,10 +15,13 @@ import numpy as np
 
 class Concat(ModelLayer):
 
-    def __init__(self, model, input_record, axis=1,
+    def __init__(self, model, input_record, axis=1, add_axis=0,
                  name='concat', **kwargs):
         super(Concat, self).__init__(model, name, input_record, **kwargs)
         self.axis = axis
+        self.add_axis = add_axis
+        assert not (axis == 0 and add_axis == 1), \
+            "It's not allowed to add axis=0"
         assert isinstance(input_record, schema.Struct),\
             "Incorrect input type. Excpected Struct, but received: {0}".\
             format(input_record)
@@ -34,10 +37,14 @@ class Concat(ModelLayer):
                 "Concat expects that limited dimensions of the input tensor"
             shapes.append(list(field_type.field_type().shape))
 
+        if add_axis:
+            for i in range(len(shapes)):
+                shapes[i].insert(axis, 1)
+
         if axis == 0:
             self.output_schema = schema.from_blob_list(
                 input_record[0],
-                [model.net.NextScopedBlob(name + '_output')]
+                [self.get_next_blob_reference('output')]
             )
             return
 
@@ -53,7 +60,7 @@ class Concat(ModelLayer):
 
         self.output_schema = schema.Scalar(
             (np.float32, output_dims),
-            model.net.NextScopedBlob(name + '_output'))
+            self.get_next_blob_reference('output'))
 
     def add_ops(self, net):
         net.Concat(
@@ -63,4 +70,5 @@ class Concat(ModelLayer):
                 self.output_schema.field_blobs()[0] + "_concat_dims"
             ],
             axis=self.axis,
+            add_axis=self.add_axis,
         )

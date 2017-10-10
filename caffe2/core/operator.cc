@@ -16,27 +16,52 @@ namespace caffe2 {
 
 OperatorBase::OperatorBase(const OperatorDef& operator_def, Workspace* ws)
     : operator_ws_(ws),
-      operator_def_(operator_def),
-      arg_helper_(operator_def_) {
-  for (const string& input_str : operator_def_.input()) {
+      operator_def_(std::make_shared<OperatorDef>(operator_def)),
+      device_option_(
+          operator_def.has_device_option() ? operator_def.device_option()
+                                           : DeviceOption()),
+      event_(device_option_) {
+  for (const string& input_str : operator_def.input()) {
     auto* blob = ws->GetBlob(input_str);
     CAFFE_ENFORCE(
         blob != nullptr,
         "op ",
-        operator_def_.type(),
+        operator_def.type(),
         ": Encountered a non-existing input blob: ",
         input_str);
     inputs_.push_back(blob);
   }
 
-  GetOperatorLogger()(operator_def_);
+  GetOperatorLogger()(operator_def);
 
-  for (const string& output_str : operator_def_.output()) {
+  for (const string& output_str : operator_def.output()) {
     outputs_.push_back(CHECK_NOTNULL(ws->CreateBlob(output_str)));
   }
 }
 
+TensorShape GetTensorShapeOfBlob(const Blob* b);
+
+vector<TensorShape> OperatorBase::InputTensorShapes() {
+  vector<TensorShape> tps;
+  for (const auto& blob : inputs_) {
+    tps.push_back(GetTensorShapeOfBlob(blob));
+  }
+  return tps;
+}
+
 namespace {
+
+PerOpEnginePrefType& g_per_op_engine_pref() {
+  static auto* g_per_op_engine_pref_ = new PerOpEnginePrefType();
+  return *g_per_op_engine_pref_;
+}
+
+GlobalEnginePrefType& g_global_engine_pref() {
+  static auto* g_global_engine_pref_ =
+      new GlobalEnginePrefType{{DeviceType::CUDA, {"CUDNN"}}};
+  return *g_global_engine_pref_;
+}
+
 unique_ptr<OperatorBase> TryCreateOperator(
     const string& key, const OperatorDef& operator_def, Workspace* ws) {
   auto type = operator_def.device_option().device_type();
@@ -62,8 +87,12 @@ unique_ptr<OperatorBase> _CreateOperator(
     const OperatorDef& operator_def,
     Workspace* ws) {
   static StaticLinkingProtector g_protector;
+  const auto op_type = operator_def.type();
+  const auto device_type = operator_def.device_option().device_type();
+
+#ifndef CAFFE2_NO_OPERATOR_SCHEMA
   // first, check with OpSchema if the operator is legal.
-  auto* schema = OpSchemaRegistry::Schema(operator_def.type());
+  auto* schema = OpSchemaRegistry::Schema(op_type);
   if (schema) {
     CAFFE_ENFORCE(
         schema->Verify(operator_def),
@@ -73,38 +102,52 @@ unique_ptr<OperatorBase> _CreateOperator(
     // We would like to recommend every op to register its schema, so if there
     // is not one, we print a LOG_ERROR. But we will still allow the operator
     // to be constructed.
-    LOG(ERROR) << "Cannot find operator schema for "
-               << operator_def.type()
+    LOG(ERROR) << "Cannot find operator schema for " << op_type
                << ". Will skip schema checking.";
   }
+#endif
 
-  // Second, if the user has provided an engine, try create that engine
+  // second try engines specified in the operator_def and preferred engines
+  std::vector<std::string> engines{};
   if (operator_def.engine().size()) {
-    vector<string> engine_choices = split(',', operator_def.engine());
-    for (const string& engine : engine_choices) {
-      string key = operator_def.type() + "_ENGINE_" + engine;
-      VLOG(1) << "Trying to create operator " << operator_def.type()
-              << " with engine " << engine;
-      auto op = TryCreateOperator(key, operator_def, ws);
-      if (op) {
-        return op;
-      } else {
-        // If the above fails, we will just return the normal case with the
-        // default implementation.
-        VLOG(1) << "Operator with engine " << engine
-                << " is not available. Using default implementation.";
-      }
+    const auto op_def_engines = split(',', operator_def.engine());
+    engines.insert(engines.end(), op_def_engines.begin(), op_def_engines.end());
+  }
+  if (g_per_op_engine_pref().count(device_type) &&
+      g_per_op_engine_pref()[device_type].count(op_type)) {
+    const auto& preferred_engines =
+        g_per_op_engine_pref()[device_type][op_type];
+    engines.insert(
+        engines.end(), preferred_engines.begin(), preferred_engines.end());
+  }
+  if (g_global_engine_pref().count(device_type)) {
+    const auto& preferred_engines = g_global_engine_pref()[device_type];
+    engines.insert(
+        engines.end(), preferred_engines.begin(), preferred_engines.end());
+  }
+  for (const auto& engine : engines) {
+    const std::string key = op_type + "_ENGINE_" + engine;
+    VLOG(1) << "Trying to create operator " << op_type << " with engine "
+            << engine;
+    auto op = TryCreateOperator(key, operator_def, ws);
+    if (op) {
+      return op;
+    } else {
+      // If the above fails, we will just return the normal case with the
+      // default implementation.
+      VLOG(1) << "Operator with engine " << engine << " is not available.";
     }
   }
+  VLOG(1) << "Using default implementation.";
 
   // Lastly, if the engine does not work here, try using the default engine.
-  auto op = TryCreateOperator(operator_def.type(), operator_def, ws);
+  auto op = TryCreateOperator(op_type, operator_def, ws);
   CAFFE_ENFORCE(
       op,
       "Cannot create operator of type '",
-      operator_def.type(),
+      op_type,
       "' on the device '",
-      DeviceTypeName(operator_def.device_option().device_type()),
+      DeviceTypeName(device_type),
       "'. Verify that implementation for the corresponding device exist. It "
       "might also happen if the binary is not linked with the operator "
       "implementation code. If Python frontend is used it might happen if "
@@ -114,6 +157,70 @@ unique_ptr<OperatorBase> _CreateOperator(
 }
 
 } // namespace
+
+void SetPerOpEnginePref(const PerOpEnginePrefType& per_op_engine_pref) {
+  for (const auto& device_pref_pair : per_op_engine_pref) {
+    const auto& device_type = device_pref_pair.first;
+    CAFFE_ENFORCE(
+        gDeviceTypeRegistry()->count(device_type),
+        "Device type ",
+        device_type,
+        " not registered.");
+    auto* registry = gDeviceTypeRegistry()->at(device_type);
+
+    for (const auto& op_pref_pair : device_pref_pair.second) {
+      const auto& op_type = op_pref_pair.first;
+      CAFFE_ENFORCE(
+          registry->Has(op_type),
+          "Operator type ",
+          op_type,
+          " not registered in ",
+          device_type,
+          " registry.");
+    }
+  }
+  g_per_op_engine_pref() = per_op_engine_pref;
+}
+
+void SetGlobalEnginePref(const GlobalEnginePrefType& global_engine_pref) {
+  for (const auto& device_pref_pair : global_engine_pref) {
+    const auto& device_type = device_pref_pair.first;
+    CAFFE_ENFORCE(
+        gDeviceTypeRegistry()->count(device_type),
+        "Device type ",
+        device_type,
+        " not registered.");
+  }
+  g_global_engine_pref() = global_engine_pref;
+}
+
+void SetEnginePref(
+    const PerOpEnginePrefType& per_op_engine_pref,
+    const GlobalEnginePrefType& global_engine_pref) {
+  SetPerOpEnginePref(per_op_engine_pref);
+  SetGlobalEnginePref(global_engine_pref);
+}
+
+void SetOpEnginePref(
+    const std::string& op_type,
+    const CaffeMap<int, EnginePrefType>& op_pref) {
+  for (const auto& device_pref_pair : op_pref) {
+    const auto& device_type = device_pref_pair.first;
+    CAFFE_ENFORCE(
+        gDeviceTypeRegistry()->count(device_type),
+        "Device type ",
+        device_type,
+        " not registered.");
+    CAFFE_ENFORCE(
+        gDeviceTypeRegistry()->at(device_type)->Has(op_type),
+        "Operator type ",
+        op_type,
+        " not registered in ",
+        device_type,
+        " registry.");
+    g_per_op_engine_pref()[device_type][op_type] = device_pref_pair.second;
+  }
+}
 
 unique_ptr<OperatorBase> CreateOperator(
     const OperatorDef& operator_def,
@@ -219,6 +326,7 @@ static TensorShapes InferBlobShapesAndTypes(
   for (auto& defptr : nets) {
     // Hack to work with auto split gradients
     CaffeMap<string, string> unmatched_sum_blobs;
+    CaffeMap<string, TensorShape> reshape_cache;
 
     for (const OperatorDef& op : defptr.get()->op()) {
       // Hack to ignore queues
@@ -274,6 +382,13 @@ static TensorShapes InferBlobShapesAndTypes(
         }
       }
 
+      if (op.type() == "Reshape" && op.is_gradient_op()) {
+        CAFFE_ENFORCE(reshape_cache.find(op.input(1)) != reshape_cache.end());
+        TensorShape cached = reshape_cache[op.input(1)];
+        blob_desc[op.output(0)] = cached;
+        continue;
+      }
+
       std::vector<TensorShape> out;
       try {
         out = op_schema->InferTensor(op, input_desc);
@@ -299,10 +414,18 @@ static TensorShapes InferBlobShapesAndTypes(
             }
           }
         }
+
+        if (op.type() == "Reshape") {
+          // Reshape stores the original input shape to its second output
+          // blob. We need this for gradient reshape.
+          reshape_cache[op.output(1)] = input_desc[0];
+        }
+
       } catch (::caffe2::EnforceNotMet& enf) {
         LOG(ERROR) << "Shape inference error: " << enf.msg();
         LOG(ERROR) << "Operator: " << ProtoDebugString(op) << std::endl;
         LOG(ERROR) << "Returning empty results.";
+
         TensorShapes tps;
         return tps;
       }
@@ -339,6 +462,29 @@ static TensorShapes InferBlobShapesAndTypes(
   return tps;
 }
 
+TensorShape GetTensorShapeOfBlob(const Blob* b) {
+  TypeCall type_fun = GetTypeCallFunction(b->meta().id());
+  TensorInfoCall tensor_info_fun = GetTensorInfoFunction(b->meta().id());
+  TensorShape tp;
+
+  if (type_fun) {
+    tp.set_data_type(TypeMetaToDataType(type_fun(b->GetRaw())));
+  }
+  if (tensor_info_fun) {
+    bool _shares_data;
+    size_t _capacity;
+    DeviceOption _device;
+    auto shape =
+        tensor_info_fun(b->GetRaw(), &_shares_data, &_capacity, &_device);
+    for (auto d : shape) {
+      tp.add_dims(d);
+    }
+  } else {
+    tp.set_unknown_shape(true);
+  }
+  return tp;
+}
+
 TensorShapes InferBlobShapesAndTypesFromWorkspace(
     Workspace* ws,
     const vector<std::unique_ptr<NetDef>>& nets) {
@@ -347,25 +493,7 @@ TensorShapes InferBlobShapesAndTypesFromWorkspace(
   const std::vector<string>& ws_blobs = ws->Blobs();
   for (const auto& s : ws_blobs) {
     Blob* b = ws->GetBlob(s);
-    TypeCall type_fun = GetTypeCallFunction(b->meta().id());
-    TensorInfoCall tensor_info_fun = GetTensorInfoFunction(b->meta().id());
-    TensorShape tp;
-
-    if (type_fun) {
-        tp.set_data_type(TypeMetaToDataType(type_fun(b->GetRaw())));
-    }
-    if (tensor_info_fun) {
-      bool _shares_data;
-      size_t _capacity;
-      DeviceOption _device;
-      auto shape =
-          tensor_info_fun(b->GetRaw(), &_shares_data, &_capacity, &_device);
-      for (auto d : shape) {
-        tp.add_dims(d);
-      }
-    } else {
-      tp.set_unknown_shape(true);
-    }
+    TensorShape tp = GetTensorShapeOfBlob(b);
     blob_desc[s] = tp;
   }
   return InferBlobShapesAndTypes(blob_desc, nets);
@@ -388,17 +516,20 @@ TensorShapes InferBlobShapesAndTypesFromMap(
 }
 
 std::map<string, std::pair<DeviceOption, DeviceOption>> ValidateTensorDevices(
-    OperatorBase& op) {
+    OperatorBase& op,
+    const OperatorDef& op_def) {
   std::map<string, std::pair<DeviceOption, DeviceOption>> mismatches;
-  DeviceOption op_device = op.def().device_option();
+  DeviceOption op_device = op_def.device_option();
 
+#ifndef CAFFE2_NO_OPERATOR_SCHEMA
   // Check from op schema if this op is used for crossing devices
-  auto op_schema = OpSchemaRegistry::Schema(op.def().type());
+  auto op_schema = OpSchemaRegistry::Schema(op_def.type());
   if (op_schema != nullptr) {
     if (op_schema->inputs_can_cross_devices()) {
       return mismatches;
     }
   }
+#endif // CAFFE2_NO_OPERATOR_SCHEMA
 
   auto Check = [&](const Blob& blob, std::string blob_name) {
     TensorInfoCall tensor_info_fun = GetTensorInfoFunction(blob.meta().id());
@@ -421,10 +552,10 @@ std::map<string, std::pair<DeviceOption, DeviceOption>> ValidateTensorDevices(
 
   // Check that inputs have same device type as the op
   for (int i = 0; i < op.InputSize(); i++) {
-    Check(op.InputBlob(i), op.def().input(i));
+    Check(op.InputBlob(i), op_def.input(i));
   }
   for (int i = 0; i < op.OutputSize(); i++) {
-    Check(*op.OutputBlob(i), op.def().output(i));
+    Check(*op.OutputBlob(i), op_def.output(i));
   }
   return mismatches;
 }

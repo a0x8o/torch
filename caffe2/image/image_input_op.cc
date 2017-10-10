@@ -6,7 +6,7 @@ REGISTER_CPU_OPERATOR(ImageInput, ImageInputOp<CPUContext>);
 
 OPERATOR_SCHEMA(ImageInput)
     .NumInputs(0, 1)
-    .NumOutputs(2)
+    .NumOutputs(2, INT_MAX)
     .TensorInferenceFunction(
         [](const OperatorDef& def, const vector<TensorShape>& /* unused */ ) {
           vector<TensorShape> out(2);
@@ -42,6 +42,23 @@ The dimension of the output image will always be cropxcrop
     .Arg("batch_size", "Number of images to output for each run of the operator"
          ". Must be 1 or greater")
     .Arg("color", "Number of color channels (1 or 3). Defaults to 1")
+    .Arg("color_jitter", "Whether or not to do color jitter. Defaults to 0")
+    .Arg("img_saturation", "Image saturation scale used in color jittering. "
+         "Defaults to 0.4")
+    .Arg("img_brightness", "Image brightness scale used in color jittering. "
+         "Defaults to 0.4")
+    .Arg("img_contrast", "Image contrast scale used in color jittering. "
+         "Defaults to 0.4")
+    .Arg("color_lighting", "Whether or not to do color lighting."
+         " Defaults to 0")
+    .Arg("color_lighting_std", "Std of normal distribution where color lighting"
+        " scaling factor is sampled. Defaults to 0.1")
+    .Arg("scale_jitter_type", "Type 0: No scale jittering "
+          "Type 1: Inception-style scale jittering")
+    .Arg("label_type", "Type 0: single integer label for multi-class "
+        "classification. Type 1: sparse active label indices for multi-label "
+        "classification. Type 2: dense label embedding vector for label "
+        "embedding regression")
     .Arg("scale", "Scale the size of the smallest dimension of the image to"
          " this. Scale and minsize are mutually exclusive."
          " Must be larger than crop")
@@ -65,7 +82,7 @@ The dimension of the output image will always be cropxcrop
     .Arg("bounding_xmin", "Bounding box coordinate. Defaults to -1 (none)")
     .Arg("bounding_height", "Bounding box coordinate. Defaults to -1 (none)")
     .Arg("bounding_width", "Bounding box coordinate. Defaults to -1 (none)")
-    .Arg("is_test", "Set to 1 to do deterministic cropping. Defaults to 0")
+    .ArgIsTest("Set to 1 to do deterministic cropping. Defaults to 0")
     .Arg("use_caffe_datum", "1 if the input is in Caffe format. Defaults to 0")
     .Arg("use_gpu_transform", "1 if GPU acceleration should be used."
          " Defaults to 0. Can only be 1 in a CUDAContext")
@@ -75,9 +92,16 @@ The dimension of the output image will always be cropxcrop
     .Arg("db", "Name of the database (if not passed as input)")
     .Arg("db_type", "Type of database (if not passed as input)."
          " Defaults to leveldb")
+    .Arg("output_sizes", "The sizes of any outputs besides the data and label "
+         "(should have a number of elements equal to the number of additional "
+         "outputs)")
+    .Arg("random_scale", "[min, max] shortest-side desired for image resize. "
+         "Defaults to [-1, -1] or no random resize desired.")
     .Input(0, "reader", "The input reader (a db::DBReader)")
     .Output(0, "data", "Tensor containing the images")
-    .Output(1, "label", "Tensor containing the labels");
+    .Output(1, "label", "Tensor containing the labels")
+    .Output(2, "additional outputs", "Any outputs after the first 2 will be "
+            "Tensors read from the input TensorProtos");
 
 NO_GRADIENT(ImageInput);
 

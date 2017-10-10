@@ -7,14 +7,12 @@
 #include "caffe2/core/db.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/core/predictor.h"
-#include "caffe2/utils/mkl_utils.h"
+#include "caffe2/core/transform.h"
+#include "caffe2/mkl/mkl_utils.h"
+#include "caffe2/utils/cpuid.h"
 #include "caffe2/utils/string_utils.h"
 #include "google/protobuf/io/coded_stream.h"
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
-
-#if defined(_MSC_VER)
-#include "caffe2/utils/windows_cpu_supports.h"
-#endif
 
 namespace caffe2 {
 namespace python {
@@ -615,20 +613,28 @@ void addObjectMethods(py::module& m) {
     return caffe2::db::Caffe2DBRegistry()->Keys();
   });
 
-
   // OpSchema
-  py::class_<OpSchema>(m, "OpSchema")
-      .def_property_readonly("file", &OpSchema::file)
+  py::class_<OpSchema> op_schema(m, "OpSchema");
+  op_schema.def_property_readonly("file", &OpSchema::file)
       .def_property_readonly("line", &OpSchema::line)
       .def_property_readonly("private", &OpSchema::private_op)
       .def_property_readonly(
           "doc", &OpSchema::doc, py::return_value_policy::reference)
-      .def_property_readonly("arg_desc", &OpSchema::arg_desc)
+      .def_property_readonly("args", &OpSchema::args)
       .def_property_readonly("input_desc", &OpSchema::input_desc)
       .def_property_readonly("output_desc", &OpSchema::output_desc)
+      .def_property_readonly("max_input", &OpSchema::max_input)
+      .def_property_readonly("max_output", &OpSchema::max_output)
+      .def_property_readonly("min_input", &OpSchema::min_input)
+      .def_property_readonly("min_output", &OpSchema::min_output)
+      .def_property_readonly("inf", &OpSchema::inf)
       // Note: this does not work yet, we will need to figure out how to pass
       // protobuf objects.
       .def("infer_tensor", &OpSchema::InferTensor)
+      .def("CalculateOutput", &OpSchema::CalculateOutput)
+      .def("num_inputs_allowed", &OpSchema::num_inputs_allowed)
+      .def("num_outputs_allowed", &OpSchema::num_outputs_allowed)
+      .def("num_inputs_outputs_allowed", &OpSchema::num_inputs_outputs_allowed)
       .def_static(
           "get", &OpSchemaRegistry::Schema, py::return_value_policy::reference)
       .def_static(
@@ -643,6 +649,11 @@ void addObjectMethods(py::module& m) {
           "get_gradient_impl",
           DefinitionGetter(GradientRegistry()),
           py::return_value_policy::reference);
+
+  py::class_<OpSchema::Argument>(op_schema, "Argument")
+      .def_property_readonly("name", &OpSchema::Argument::name)
+      .def_property_readonly("description", &OpSchema::Argument::description)
+      .def_property_readonly("required", &OpSchema::Argument::is_required);
 
   py::class_<Predictor>(m, "Predictor")
       .def(
@@ -695,6 +706,34 @@ void addGlobalMethods(py::module& m) {
 #endif // CAFFE2_HAS_MKL_DNN
       );
 
+  m.attr("define_caffe2_no_operator_schema") = py::bool_(
+#ifdef CAFFE2_NO_OPERATOR_SCHEMA
+      true
+#else // CAFFE2_NO_OPERATOR_SCHEMA
+      false
+#endif // CAFFE2_NO_OPERATOR_SCHEMA
+      );
+
+  m.def("set_per_op_engine_pref", [](const PerOpEnginePrefType& pref) -> void {
+    caffe2::SetPerOpEnginePref(pref);
+  });
+
+  m.def("set_global_engine_pref", [](const GlobalEnginePrefType& pref) -> void {
+    caffe2::SetGlobalEnginePref(pref);
+  });
+  m.def(
+      "set_engine_pref",
+      [](const PerOpEnginePrefType& per_op_pref,
+         const GlobalEnginePrefType& global_pref) -> void {
+        caffe2::SetEnginePref(per_op_pref, global_pref);
+      });
+  m.def(
+      "set_op_engine_pref",
+      [](const std::string& op_type,
+         const CaffeMap<int, EnginePrefType>& op_pref) -> void {
+        caffe2::SetOpEnginePref(op_type, op_pref);
+      });
+
   m.def("global_init", [](std::vector<std::string> args) -> void {
     int argc = args.size();
     std::vector<char*> argv;
@@ -726,9 +765,9 @@ void addGlobalMethods(py::module& m) {
   m.def("on_module_exit", []() { gWorkspaces.clear(); });
   // create_if_missing not used by necessary for pybind to do
   // properly do function overloading.
-  m.def("switch_workspace", [](Workspace* ws, py::object create_if_missing) {
-    gWorkspace = ws;
-  });
+  m.def(
+      "switch_workspace",
+      [](Workspace* ws, py::object /*create_if_missing*/) { gWorkspace = ws; });
   m.def(
       "switch_workspace",
       [](const std::string& name, const py::object create_if_missing) {
@@ -772,7 +811,7 @@ void addGlobalMethods(py::module& m) {
     std::vector<std::string> alternatives;
     int editTolerance = 3;
     for (auto it : caffe2::CPUOperatorRegistry()->Keys()) {
-      if(editDistance(it, name, editTolerance) < editTolerance + 1) {
+      if (editDistance(it, name, editTolerance) < editTolerance + 1) {
         alternatives.push_back(it);
       }
     }
@@ -871,6 +910,93 @@ void addGlobalMethods(py::module& m) {
     CAFFE_ENFORCE(gWorkspace->RunPlan(def));
     return true;
   });
+  m.def(
+      "apply_transform",
+      [](const string& transform_key, const py::bytes& net_def) {
+        NetDef def;
+        CAFFE_ENFORCE(
+            ParseProtobufFromLargeString(net_def.cast<std::string>(), &def));
+        py::gil_scoped_release g;
+
+        auto transformed_net = ApplyTransform(transform_key, def);
+
+        std::string protob;
+        CAFFE_ENFORCE(transformed_net.SerializeToString(&protob));
+        return py::bytes(protob);
+      });
+  m.def(
+      "apply_transform_if_faster",
+      [](const string& transform_key,
+         const py::bytes& net_def_bytes,
+         const py::bytes& init_def_bytes,
+         int warmup_runs,
+         int main_runs,
+         double improvement_threshold) {
+        NetDef def;
+        CAFFE_ENFORCE(ParseProtobufFromLargeString(
+            net_def_bytes.cast<std::string>(), &def));
+        NetDef init_def;
+        CAFFE_ENFORCE(ParseProtobufFromLargeString(
+            init_def_bytes.cast<std::string>(), &init_def));
+        py::gil_scoped_release g;
+
+        std::string protob;
+
+        auto transformed_net = ApplyTransformIfFaster(
+            transform_key,
+            def,
+            init_def,
+            warmup_runs,
+            main_runs,
+            improvement_threshold);
+
+        CAFFE_ENFORCE(transformed_net.SerializeToString(&protob));
+        return py::bytes(protob);
+      });
+  m.def(
+      "memonger_compute_blob_recycling_for_dag",
+      [](const py::bytes& net_def,
+         const std::vector<string>& input_blobs,
+         const std::vector<int>& op_indices,
+         const std::unordered_set<string>& shareable_blob_names,
+         const string& namescope,
+         const std::unordered_set<string>& dont_share_blob_names,
+         const std::unordered_map<string, vector<int>>& blob_shapes) {
+        py::gil_scoped_release g;
+        NetDef net;
+        CAFFE_ENFORCE(
+            ParseProtobufFromLargeString(net_def.cast<std::string>(), &net));
+        NetDef optimized_proto =
+            caffe2::memonger::compute_blob_recycling_for_dag(
+                net,
+                input_blobs,
+                op_indices,
+                shareable_blob_names,
+                namescope,
+                dont_share_blob_names,
+                blob_shapes);
+        std::string protob;
+        CAFFE_ENFORCE(optimized_proto.SerializeToString(&protob));
+        return py::bytes(protob);
+      });
+  m.def(
+      "memonger_optimize_inference_net",
+      [](const py::bytes& net_def,
+         const std::vector<std::string>& static_blobs) {
+        NetDef def;
+        CAFFE_ENFORCE(
+            ParseProtobufFromLargeString(net_def.cast<std::string>(), &def));
+        py::gil_scoped_release g;
+
+        std::set<string> static_blobs_set(
+            static_blobs.begin(), static_blobs.end());
+        NetDef optimized =
+            caffe2::memonger::optimize_inference_net(def, static_blobs_set);
+
+        std::string protob;
+        CAFFE_ENFORCE(optimized.SerializeToString(&protob));
+        return py::bytes(protob);
+      });
   m.def(
       "infer_shapes_and_types_from_workspace",
       [](const std::vector<py::bytes>& net_protos) {
@@ -1009,32 +1135,10 @@ void addGlobalMethods(py::module& m) {
     return std::make_pair(in_res, out_res);
   });
 
-#define CAFFE2_CPU_FEATURE_SUPPORT(feature)      \
-  m.def("builtin_cpu_supports_" #feature, []() { \
-    return __builtin_cpu_supports(#feature);     \
-  })
+#define CAFFE2_CPU_FEATURE_SUPPORT(feature) \
+  m.def("builtin_cpu_supports_" #feature, []() { return GetCpuId().feature(); })
 
-// Clang does not support __builtin_cpu_supports until
-// revision r240994:
-// http://lists.llvm.org/pipermail/cfe-commits/Week-of-Mon-20150629/131941.html
-#if (                                                                 \
-    __clang__ && ((__apple_build_version__ &&                         \
-                   ((__clang_major__ == 8 && __clang_minor__ == 0) || \
-                    (__clang_major__ <= 7))) ||                       \
-                  (!__apple_build_version__ &&                        \
-                   ((__clang_major__ == 3 && __clang_minor__ < 7) ||  \
-                    (__clang_major__ <= 2)))))
-#warning \
-    "Compiling without AVX2. Please consider upgrading your version of Clang."
-  // Provide a dummy avx2 flag.
-  m.def("builtin_cpu_supports_avx2", []() { return false; });
-#elif defined(CAFFE2_NO_BUILTIN_CPU_SUPPORTS) && !defined(__AVX2__)
-  // If the compile does not support builtin_cpu_supports, and avx2 is not
-  // manually specified, we mark it as not-supported.
-  m.def("builtin_cpu_supports_avx2", []() { return false; });
-#else
   CAFFE2_CPU_FEATURE_SUPPORT(avx2);
-#endif
 
 #undef CAFFE2_CPU_FEATURE_SUPPORT
 

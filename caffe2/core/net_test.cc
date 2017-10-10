@@ -1,6 +1,7 @@
 #include <google/protobuf/text_format.h>
 #include <gtest/gtest.h>
 #include "caffe2/core/net.h"
+#include "caffe2/core/net_dag.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/core/scope_guard.h"
 
@@ -23,7 +24,7 @@ class NetTestDummyOp final : public OperatorBase {
       : OperatorBase(operator_def, ws),
         fail_(OperatorBase::GetSingleArgument<bool>("fail", false)) {}
 
-  bool Run(int /* unused */ stream_id) override {
+  bool Run(int /* unused */ /*stream_id*/) override {
     if (fail_) {
       return false;
     }
@@ -232,7 +233,9 @@ TEST(NetTest, ChainingForDifferentDevices) {
           }
         }
 )DOC";
-  checkChainingAndRun(spec, {{0, {0}}, {1, {1, 2}}, {3, {3}}});
+  if (HasCudaRuntime()) {
+    checkChainingAndRun(spec, {{0, {0}}, {1, {1, 2}}, {3, {3}}});
+  }
 }
 
 TEST(NetTest, ChainingForFork) {

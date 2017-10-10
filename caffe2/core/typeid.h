@@ -3,9 +3,9 @@
 
 #include <cassert>
 #include <cstdlib>
-
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <type_traits>
 #ifdef __GXX_RTTI
 #include <set>
@@ -31,9 +31,12 @@ string Demangle(const char* name);
 // type before its what() content.
 string GetExceptionString(const std::exception& e);
 
+std::mutex& gCaffe2TypeRegistrationMutex();
+
 template <typename T>
 struct TypeNameRegisterer {
   explicit TypeNameRegisterer(CaffeTypeId id) {
+    std::lock_guard<std::mutex> guard(gCaffe2TypeRegistrationMutex());
 #ifdef __GXX_RTTI
     string name = Demangle(typeid(T).name());
     gTypeNames()[id] = name;
@@ -221,7 +224,8 @@ class TypeMeta {
    * A placeholder function for types that do not allow assignment.
    */
   template <typename T>
-  static void _CopyNotAllowed(const void* src, void* dst, size_t n) {
+  static void
+  _CopyNotAllowed(const void* /*src*/, void* /*dst*/, size_t /*n*/) {
     std::cerr << "Type " << Name<T>() << " does not allow assignment.";
     // This is an error by design, so we will quit loud.
     abort();
@@ -242,7 +246,9 @@ class TypeMeta {
    * Returns a TypeMeta object that corresponds to the typename T.
    */
   template <typename T>
-  static typename std::enable_if<std::is_fundamental<T>::value, TypeMeta>::type
+  static typename std::enable_if<
+      std::is_fundamental<T>::value || std::is_pointer<T>::value,
+      TypeMeta>::type
   Make() {
     return TypeMeta(Id<T>(), ItemSize<T>(), nullptr, nullptr, nullptr);
   }
@@ -250,7 +256,7 @@ class TypeMeta {
   template <
       typename T,
       typename std::enable_if<
-          !std::is_fundamental<T>::value &&
+          !(std::is_fundamental<T>::value || std::is_pointer<T>::value) &&
           std::is_copy_assignable<T>::value>::type* = nullptr>
   static TypeMeta Make() {
     return TypeMeta(Id<T>(), ItemSize<T>(), _Ctor<T>, _Copy<T>, _Dtor<T>);
@@ -259,7 +265,7 @@ class TypeMeta {
   template <typename T>
   static TypeMeta Make(
       typename std::enable_if<
-          !std::is_fundamental<T>::value &&
+          !(std::is_fundamental<T>::value || std::is_pointer<T>::value) &&
           !std::is_copy_assignable<T>::value>::type* = 0) {
     return TypeMeta(
         Id<T>(), ItemSize<T>(), _Ctor<T>, _CopyNotAllowed<T>, _Dtor<T>);

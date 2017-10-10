@@ -1,9 +1,29 @@
 #include "caffe2/operators/im2col_op.h"
 
 namespace caffe2 {
-namespace {
 REGISTER_CPU_OPERATOR(Im2Col, Im2ColOp<float, CPUContext>);
 REGISTER_CPU_OPERATOR(Col2Im, Col2ImOp<float, CPUContext>);
+
+class GetIm2ColGradient : public GradientMakerBase {
+  using GradientMakerBase::GradientMakerBase;
+  vector<OperatorDef> GetGradientDefs() override {
+    return SingleGradientDef(
+        "Col2Im",
+        "",
+        std::vector<string>{O(0), I(0)},
+        std::vector<string>{GI(0)});
+  }
+};
+REGISTER_GRADIENT(Im2Col, GetIm2ColGradient);
+
+class GetCol2ImGradient : public GradientMakerBase {
+  using GradientMakerBase::GradientMakerBase;
+  vector<OperatorDef> GetGradientDefs() override {
+    return SingleGradientDef(
+        "Im2Col", "", std::vector<string>{O(0)}, std::vector<string>{GI(0)});
+  }
+};
+REGISTER_GRADIENT(Col2Im, GetCol2ImGradient);
 
 OPERATOR_SCHEMA(Im2Col)
     .NumInputs(1)
@@ -81,5 +101,4 @@ OPERATOR_SCHEMA(Im2Col)
 
 OPERATOR_SCHEMA(Col2Im).NumInputs(2).NumOutputs(1);
 
-} // namespace
 } // namespace caffe2

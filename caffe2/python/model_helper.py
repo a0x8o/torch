@@ -10,6 +10,10 @@ from caffe2.python.modeling import parameter_info
 from caffe2.python.modeling.parameter_sharing import (
     parameter_sharing_context,
 )
+from caffe2.python.optimizer_context import (
+    OptimizerContext,
+    DEFAULT_OPTIM,
+)
 from caffe2.proto import caffe2_pb2
 
 from future.utils import viewitems, viewkeys
@@ -47,6 +51,7 @@ _known_working_ops = [
     "PackSegments",
     "Print",
     "PRelu",
+    "ReduceFrontSum",
     "Scale",
     "ScatterWeightedSum",
     "Sigmoid",
@@ -62,7 +67,7 @@ _known_working_ops = [
     "Transpose",
     "UnpackSegments",
     "WeightedSum",
-    "ReduceFrontSum",
+    "YellowFin"
 ]
 
 
@@ -93,15 +98,16 @@ class ModelHelper(object):
             self.param_init_net = param_model.param_init_net
             self.param_to_grad = param_model.param_to_grad
             self.params = param_model.params
+            self._parameters_info = param_model._parameters_info
             self._computed_params = param_model._computed_params
         else:
             self.param_init_net = core.Net(self.name + '_init')
             self.param_to_grad = {}
             self.params = []
+            self._parameters_info = {}
             self._computed_params = []
 
         self._param_info_deprecated = []
-        self._parameters_info = {}
         self._devices = []
         self.gradient_ops_added = False
         self.init_params = init_params
@@ -146,6 +152,10 @@ class ModelHelper(object):
                 shape=self._infer_param_shape(param)))
         for info in self._param_info_deprecated:
             info.grad = self.param_to_grad.get(info.name)
+
+    def _normalize_tags(self, tags):
+        tags = tags or []
+        return set(tags) if isinstance(tags, list) else set([tags])
 
     def create_param(self, param_name, shape, initializer, tags=None):
         """
@@ -203,6 +213,14 @@ class ModelHelper(object):
             init_net=self.param_init_net,
             shape=shape,
         )
+        optim_context = OptimizerContext.current()
+        for tag in self._normalize_tags(tags):
+            if optim_context.has_optimizer(tag):
+                # param_info will check optimizer has not been set
+                param_info.optimizer = optim_context.get_optimizer(tag)
+        if not param_info.optimizer and optim_context.has_optimizer(DEFAULT_OPTIM):
+            param_info.optimizer = optim_context.get_optimizer(DEFAULT_OPTIM)
+
         self._parameters_info[param_name] = param_info
         # Add param to legacy structs as well, so all other functions for
         # parameters are still working.
@@ -253,11 +271,7 @@ class ModelHelper(object):
 
     def AddParameter(self, param, tags=None):
         assert isinstance(param, core.BlobReference)
-        tags = tags or []
-        if isinstance(tags, list):
-            tags = set(tags)
-        else:
-            tags = set([tags])
+        tags = self._normalize_tags(tags)
         if parameter_info.ParameterTags.COMPUTED_PARAM in tags:
             self._computed_params.append(param)
         else:
@@ -403,7 +417,7 @@ class ModelHelper(object):
             return self._computed_params[:]
         else:
             return [p for p in self._computed_params
-                    if p.GetNameScope() == namescope]
+                    if p.GetNameScope().startswith(namescope)]
 
     def GetAllParams(self, namescope=None):
         return self.GetParams(namescope) + self.GetComputedParams(namescope)
@@ -523,6 +537,16 @@ def ExtractPredictorNet(
                     " Op was: {}".format(str(op))
                 )
 
+    def rename_list(proto_list):
+        # proto lists don't support assignments
+        new_list = proto_list[:]
+        for j, b in enumerate(new_list):
+            if b in renames:
+                new_list[j] = renames[b]
+
+        del proto_list[:]
+        proto_list.extend(new_list)
+
     # Iterate through the ops and only include those whose inputs
     # we can satisfy.
     for op in ops[first_op_with_input:(last_op_with_output + 1)]:
@@ -540,9 +564,14 @@ def ExtractPredictorNet(
                         step_proto = caffe2_pb2.NetDef()
                         protobuftx.Merge(arg.s.decode("ascii"), step_proto)
                         for step_op in step_proto.op:
+                            rename_list(step_op.input)
+                            rename_list(step_op.output)
                             if device is not None:
                                 step_op.device_option.device_type = device.device_type
                                 step_op.device_option.cuda_gpu_id = device.cuda_gpu_id
+
+                        rename_list(step_proto.external_input)
+                        rename_list(step_proto.external_output)
 
                         # Add additional external inputs
                         external_inputs.update(
@@ -565,23 +594,12 @@ def ExtractPredictorNet(
                 set(op.output).intersection(orig_external_outputs)
             )
 
-
         else:
             logging.debug(
                 "Op {} had unknown inputs: {}".format(
                     op.type, set(op.input).difference(known_blobs)
                 )
             )
-
-    def rename_list(proto_list):
-        # proto lists don't support assignments
-        new_list = proto_list[:]
-        for j, b in enumerate(new_list):
-            if b in renames:
-                new_list[j] = renames[b]
-
-        del proto_list[:]
-        proto_list.extend(new_list)
 
     # Predictor net's external inputs and outputs include only those
     # that are part of this net.

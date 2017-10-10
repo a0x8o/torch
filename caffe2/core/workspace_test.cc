@@ -27,7 +27,7 @@ TEST(WorkspaceTest, BlobAccess) {
 
   // Check if the returned Blob is OK for all operations
   Blob* blob = ws.GetBlob("newblob");
-  int* int_unused UNUSED_VARIABLE = blob->GetMutable<int>();
+  int* int_unused CAFFE2_UNUSED = blob->GetMutable<int>();
   EXPECT_TRUE(blob->IsType<int>());
   EXPECT_FALSE(blob->IsType<WorkspaceTestFoo>());
   EXPECT_NE(&blob->Get<int>(), nullptr);
@@ -76,6 +76,29 @@ TEST(WorkspaceTest, Sharing) {
     EXPECT_TRUE(parent.CreateBlob("b"));
     // But child has local overrides
     EXPECT_NE(child.GetBlob("b"), parent.GetBlob("b"));
+  }
+}
+
+TEST(WorkspaceTest, BlobMapping) {
+  Workspace parent;
+  EXPECT_FALSE(parent.HasBlob("a"));
+  EXPECT_TRUE(parent.CreateBlob("a"));
+  EXPECT_TRUE(parent.GetBlob("a"));
+  {
+    std::unordered_map<string, string> forwarded_blobs;
+    forwarded_blobs["inner_a"] = "a";
+    Workspace child(&parent, forwarded_blobs);
+    EXPECT_FALSE(child.HasBlob("a"));
+    EXPECT_TRUE(child.HasBlob("inner_a"));
+    EXPECT_TRUE(child.GetBlob("inner_a"));
+    Workspace ws;
+    EXPECT_TRUE(ws.CreateBlob("b"));
+    forwarded_blobs.clear();
+    forwarded_blobs["inner_b"] = "b";
+    child.AddBlobMapping(&ws, forwarded_blobs);
+    EXPECT_FALSE(child.HasBlob("b"));
+    EXPECT_TRUE(child.HasBlob("inner_b"));
+    EXPECT_TRUE(child.GetBlob("inner_b"));
   }
 }
 

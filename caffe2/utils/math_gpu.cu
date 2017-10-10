@@ -35,6 +35,8 @@ DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, Log, logf);
 DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, Cos, cosf);
 DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, Sin, sinf);
 DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, Abs, fabsf);
+DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, Sqrt, sqrtf);
+DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, InvSqrt, rsqrtf);
 
 __device__ float cuda_sqrf(const float x) { return x * x; }
 
@@ -42,7 +44,29 @@ DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, Sqr, cuda_sqrf);
 
 #undef DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION
 
-#define DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(T, Funcname, expr)               \
+#define DELEGATE_SINCOS_CUDA_FUNCTION(T)                             \
+  __global__ void _Kernel_##T##_##SinCos(                            \
+      const int N, const T* x, T* ys, T* yc) {                       \
+    CUDA_1D_KERNEL_LOOP(i, N) {                                      \
+      sincos(x[i], ys + i, yc + i);                                  \
+    }                                                                \
+  }                                                                  \
+  template <>                                                        \
+  void SinCos<T, CUDAContext>(                                       \
+      const int N, const T* x, T* ys, T* yc, CUDAContext* context) { \
+    _Kernel_##T##_##SinCos<<<                                        \
+        CAFFE_GET_BLOCKS(N),                                         \
+        CAFFE_CUDA_NUM_THREADS,                                      \
+        0,                                                           \
+        context->cuda_stream()>>>(N, x, ys, yc);                     \
+  }
+
+DELEGATE_SINCOS_CUDA_FUNCTION(float)
+DELEGATE_SINCOS_CUDA_FUNCTION(double)
+
+#undef DELEGATE_SINCOS_CUDA_FUNCTION
+
+#define DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(T, Funcname, expr)         \
   __global__ void _Kernel_##T##_##Funcname(                                   \
       const int N, const T* a, const T* b, T* y) {                            \
     CUDA_1D_KERNEL_LOOP(i, N) {                                               \
@@ -60,15 +84,72 @@ DELEGATE_SIMPLE_CUDA_UNARY_FUNCTION(float, Sqr, cuda_sqrf);
         context->cuda_stream()>>>(N, a, b, y);                                \
   }
 
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float, Add, +);
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float, Sub, -);
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float, Mul, *);
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float, Div, /);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float, Add, +);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(int32_t, Add, +);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float, Sub, -);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float, Mul, *);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float, Div, /);
 
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float16, Add, +);
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float16, Sub, -);
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float16, Mul, *);
-DELEGATE_SIMPLE_CUDA_BINARY_FUNCTION(float16, Div, /);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float16, Add, +);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float16, Sub, -);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float16, Mul, *);
+DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION(float16, Div, /);
+
+#undef DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION
+
+#define DELEGATE_SIMPLE_CUDA_BINARY_PREFIX_FUNCTION(T, Funcname, func)    \
+  __global__ void _Kernel_##T##_##Funcname(                               \
+      const int N, const T* a, const T* b, T* y) {                        \
+    CUDA_1D_KERNEL_LOOP(i, N) {                                           \
+      float r =                                                           \
+          func(convert::To<T, float>(a[i]), convert::To<T, float>(b[i])); \
+      y[i] = convert::To<float, T>(r);                                    \
+    }                                                                     \
+  }                                                                       \
+  template <>                                                             \
+  void Funcname<T, CUDAContext>(                                          \
+      const int N, const T* a, const T* b, T* y, CUDAContext* context) {  \
+    _Kernel_##T##_##Funcname<<<                                           \
+        CAFFE_GET_BLOCKS(N),                                              \
+        CAFFE_CUDA_NUM_THREADS,                                           \
+        0,                                                                \
+        context->cuda_stream()>>>(N, a, b, y);                            \
+  }
+
+DELEGATE_SIMPLE_CUDA_BINARY_PREFIX_FUNCTION(float, ElemwiseMax, fmaxf);
+
+#undef DELEGATE_SIMPLE_CUDA_BINARY_INFIX_FUNCTION
+
+#define DELEGATE_REDUCTION_FUNCTION(T, Funcname, func)                  \
+  template <>                                                           \
+  void Funcname<T, CUDAContext>(                                        \
+      const int N,                                                      \
+      const T* src,                                                     \
+      T* dst,                                                           \
+      Tensor<CUDAContext>* scratch_ptr,                                 \
+      CUDAContext* context) {                                           \
+    size_t memRequired = 0;                                             \
+    cub::DeviceReduce::func(                                            \
+        nullptr, memRequired, src, dst, N, context->cuda_stream());     \
+    auto buffer_size =                                                  \
+        static_cast<TIndex>((memRequired + sizeof(T) - 1) / sizeof(T)); \
+    scratch_ptr->Resize(std::vector<TIndex>{buffer_size});              \
+    cub::DeviceReduce::func(                                            \
+        static_cast<void*>(scratch_ptr->mutable_data<T>()),             \
+        memRequired,                                                    \
+        src,                                                            \
+        dst,                                                            \
+        N,                                                              \
+        context->cuda_stream());                                        \
+  }
+
+DELEGATE_REDUCTION_FUNCTION(float, ReduceMin, Min)
+DELEGATE_REDUCTION_FUNCTION(float, ReduceMax, Max)
+DELEGATE_REDUCTION_FUNCTION(int32_t, ReduceMax, Max)
+DELEGATE_REDUCTION_FUNCTION(int64_t, ReduceMax, Max)
+
+
+#undef DELEGATE_REDUCTION_FUNCTION
 
 // Caffe2 gemm provides a simpler interface to the gemm functions, with the
 // limitation that the data has to be contiguous in memory.
@@ -154,11 +235,10 @@ void Gemm<float16, CUDAContext>(
         N));
 
   } else if (math_type == TensorProto_DataType_FLOAT16) {
-    // convert alpha, beta from caffe2::float16 -> __half
-    __half alpha_fp16;
-    alpha_fp16.x = convert::To<float, float16>(alpha).x;
-    __half beta_fp16;
-    beta_fp16.x = convert::To<float, float16>(beta).x;
+    // convert alpha, beta from float -> __half
+    auto alpha_fp16 = convert::floatToHalf(alpha);
+    auto beta_fp16 = convert::floatToHalf(beta);
+
     // call cublasHgemm
     CUBLAS_CHECK(cublasHgemm(
         context->cublas_handle(),
@@ -180,6 +260,410 @@ void Gemm<float16, CUDAContext>(
     CAFFE_THROW("Unsupported math type");
   }
 }
+
+template <>
+void GemmBatched<float, CUDAContext>(
+    const CBLAS_TRANSPOSE TransA,
+    const CBLAS_TRANSPOSE TransB,
+    const int A_size,
+    const int A_batches,
+    const int B_size,
+    const int B_batches,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const float* A,
+    const float* B,
+    const float beta,
+    float* C,
+    CUDAContext* context,
+    Tensor<CUDAContext>* scratch,
+    TensorProto::DataType math_type) {
+
+#if __CUDACC_VER_MAJOR__ < 8
+  auto a_offset = A_size / A_batches;
+  auto b_offset = B_size / B_batches;
+  auto y_offset = M * N;
+  // loop over matrices in the batch
+  for (int i = 0; i < A_batches; ++i) {
+    math::Gemm<float, CUDAContext>(
+        TransA,
+        TransB,
+        M,
+        N,
+        K,
+        1,
+        A + a_offset * i,
+        B + b_offset * i,
+        0,
+        C + y_offset * i,
+        context);
+  }
+#else
+  // Note that cublas follows fortran order, so the order is different from
+  // the cblas convention.
+  int lda = (TransA == CblasNoTrans) ? K : M;
+  int ldb = (TransB == CblasNoTrans) ? N : K;
+
+  cublasOperation_t cuTransA =
+      (TransA == CblasNoTrans) ? CUBLAS_OP_N : CUBLAS_OP_T;
+  cublasOperation_t cuTransB =
+      (TransB == CblasNoTrans) ? CUBLAS_OP_N : CUBLAS_OP_T;
+  CUBLAS_ENFORCE(cublasSgemmStridedBatched(
+        context->cublas_handle(),
+        cuTransB,
+        cuTransA,
+        N,
+        M,
+        K,
+        &alpha,
+        B,
+        ldb,
+        B_size / B_batches, // B stride
+        A,
+        lda,
+        A_size / A_batches, // A stride
+        &beta,
+        C,
+        N,
+        M*N,                // C stride
+        A_batches));
+#endif
+}
+
+namespace {
+
+__global__ void FloatToHalfKernel(const int N, const float* X, half* Y) {
+  CUDA_1D_KERNEL_LOOP(i, N) {
+    Y[i] = __float2half(X[i]);
+  }
+}
+
+__global__ void HalfToFloatKernel(const int N, const half* X, float* Y) {
+  CUDA_1D_KERNEL_LOOP(i, N) {
+    Y[i] = __half2float(X[i]);
+  }
+}
+
+};
+
+template <>
+void GemmBatched<float16, CUDAContext>(
+    const CBLAS_TRANSPOSE TransA,
+    const CBLAS_TRANSPOSE TransB,
+    const int A_size,
+    const int A_batches,
+    const int B_size,
+    const int B_batches,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const float16* A,
+    const float16* B,
+    const float beta,
+    float16* C,
+    CUDAContext* context,
+    Tensor<CUDAContext>* scratch,
+    TensorProto::DataType math_type) {
+
+#if __CUDACC_VER_MAJOR__ < 8
+  auto a_offset = A_size / A_batches;
+  auto b_offset = B_size / B_batches;
+  auto y_offset = M * N;
+  // loop over matrices in the batch
+  for (int i = 0; i < A_batches; ++i) {
+    math::Gemm<float16, CUDAContext>(
+        TransA,
+        TransB,
+        M,
+        N,
+        K,
+        1,
+        A + a_offset * i,
+        B + b_offset * i,
+        0,
+        C + y_offset * i,
+        context);
+  }
+#else
+  // 3 options:
+  // 1) scratch != null = cast to fp32, SgemmStridedBatched, cast result to fp16
+  // 2) math_type == FLOAT, scratch == nullptr = looped SgemmEx
+  // 3) math_type == FLOAT16, scratch == nullptr = batched Hgemm
+
+  if (scratch != nullptr) {
+    // cast, cublasSgemmStridedBatched, cast
+    size_t in_elems = A_size + B_size;
+    size_t out_elems = A_batches*M*N;
+
+    scratch->Resize(in_elems+out_elems);
+    float* scratch_ptr = scratch->mutable_data<float>();
+
+    float* A_fp32 = scratch_ptr;
+    float* B_fp32 = scratch_ptr + A_size;
+    float* C_fp32 = scratch_ptr + A_size + B_size;
+
+    // cast A, B into fp32
+    HalfToFloatKernel<<<CAFFE_GET_BLOCKS(A_size),
+                        CAFFE_CUDA_NUM_THREADS,
+                        0,
+                        context->cuda_stream()>>>(A_size, (half*)A, A_fp32);
+    HalfToFloatKernel<<<CAFFE_GET_BLOCKS(B_size),
+                        CAFFE_CUDA_NUM_THREADS,
+                        0,
+                        context->cuda_stream()>>>(B_size, (half*)B, B_fp32);
+
+    // run fp32 batched Gemm
+    GemmBatched<float,CUDAContext>(
+        TransA,
+        TransB,
+        A_size,
+        A_batches,
+        B_size,
+        B_batches,
+        M,
+        N,
+        K,
+        alpha,
+        A_fp32,
+        B_fp32,
+        beta,
+        C_fp32,
+        context);
+
+    // cast result back to fp16
+    FloatToHalfKernel<<<CAFFE_GET_BLOCKS(A_batches*M*N),
+                        CAFFE_CUDA_NUM_THREADS,
+                        0,
+                        context->cuda_stream()>>>(A_batches*M*N, C_fp32, (half*)C);
+  } else {
+    if (math_type == TensorProto_DataType_FLOAT) {
+      auto a_offset = A_size / A_batches;
+      auto b_offset = B_size / B_batches;
+      auto y_offset = M * N;
+      // loop over matrices in the batch
+      for (int i = 0; i < A_batches; ++i) {
+        math::Gemm<float16, CUDAContext>(
+            TransA,
+            TransB,
+            M,
+            N,
+            K,
+            1,
+            A + a_offset * i,
+            B + b_offset * i,
+            0,
+            C + y_offset * i,
+            context);
+      }
+    } else if (math_type == TensorProto_DataType_FLOAT16) {
+      // Note that cublas follows fortran order, so the order is different from
+      // the cblas convention.
+      int lda = (TransA == CblasNoTrans) ? K : M;
+      int ldb = (TransB == CblasNoTrans) ? N : K;
+      cublasOperation_t cuTransA =
+          (TransA == CblasNoTrans) ? CUBLAS_OP_N : CUBLAS_OP_T;
+      cublasOperation_t cuTransB =
+          (TransB == CblasNoTrans) ? CUBLAS_OP_N : CUBLAS_OP_T;
+
+      // convert alpha, beta from float -> __half
+      auto alpha_fp16 = convert::floatToHalf(alpha);
+      auto beta_fp16 = convert::floatToHalf(beta);
+      CUBLAS_ENFORCE(cublasHgemmStridedBatched(
+            context->cublas_handle(),
+            cuTransB,
+            cuTransA,
+            N,
+            M,
+            K,
+            &alpha_fp16,
+            (const __half*)B,
+            ldb,
+            B_size / B_batches,
+            (const __half*)A,
+            lda,
+            A_size / A_batches,
+            &beta_fp16,
+            (__half*)C,
+            N,
+            M*N,
+            A_batches));
+    }
+  }
+#endif
+}
+
+#if CUDA_VERSION >= 9000
+
+// No change, but required. Defer to default CUDA engine
+template <>
+void Gemm<float, CUDAContext, TensorCoreEngine>(
+    const CBLAS_TRANSPOSE TransA,
+    const CBLAS_TRANSPOSE TransB,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const float* A,
+    const float* B,
+    const float beta,
+    float* C,
+    CUDAContext* context,
+    TensorProto::DataType math_type) {
+  return Gemm<float,CUDAContext>(TransA,
+                                 TransB,
+                                 M,
+                                 N,
+                                 K,
+                                 alpha,
+                                 A,
+                                 B,
+                                 beta,
+                                 C,
+                                 context,
+                                 math_type);
+}
+
+template <>
+void Gemm<float16, CUDAContext, TensorCoreEngine>(
+    const CBLAS_TRANSPOSE TransA,
+    const CBLAS_TRANSPOSE TransB,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const float16* A,
+    const float16* B,
+    const float beta,
+    float16* C,
+    CUDAContext* context,
+    TensorProto::DataType math_type) {
+  // Note that cublas follows fortran order, so the order is different from
+  // the cblas convention.
+  int lda = (TransA == CblasNoTrans) ? K : M;
+  int ldb = (TransB == CblasNoTrans) ? N : K;
+  cublasOperation_t cuTransA =
+      (TransA == CblasNoTrans) ? CUBLAS_OP_N : CUBLAS_OP_T;
+  cublasOperation_t cuTransB =
+      (TransB == CblasNoTrans) ? CUBLAS_OP_N : CUBLAS_OP_T;
+
+  // enable TensorCore for this call on this handle
+  if (TensorCoreAvailable()) {
+    CUBLAS_ENFORCE(cublasSetMathMode(
+        context->cublas_handle(),
+        CUBLAS_TENSOR_OP_MATH));
+  }
+
+  CUBLAS_CHECK(cublasGemmEx(
+      context->cublas_handle(),
+      cuTransB,
+      cuTransA,
+      N,
+      M,
+      K,
+      &alpha,
+      B,
+      CUDA_R_16F,
+      ldb,
+      A,
+      CUDA_R_16F,
+      lda,
+      &beta,
+      C,
+      CUDA_R_16F,
+      N,
+      CUDA_R_32F,
+      CUBLAS_GEMM_DFALT_TENSOR_OP));
+
+  // Now disable TensorCore math for subsequent calls to this handle
+  if (TensorCoreAvailable()) {
+    CUBLAS_ENFORCE(cublasSetMathMode(
+        context->cublas_handle(),
+        CUBLAS_DEFAULT_MATH));
+  }
+}
+
+template <>
+void GemmBatched<float, CUDAContext, TensorCoreEngine>(
+    const CBLAS_TRANSPOSE TransA,
+    const CBLAS_TRANSPOSE TransB,
+    const int A_size,
+    const int A_batches,
+    const int B_size,
+    const int B_batches,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const float* A,
+    const float* B,
+    const float beta,
+    float* C,
+    CUDAContext* context,
+    Tensor<CUDAContext>* scratch,
+    TensorProto::DataType math_type) {
+  return GemmBatched<float, CUDAContext, DefaultEngine>(
+      TransA,
+      TransB,
+      A_size,
+      A_batches,
+      B_size,
+      B_batches,
+      M,
+      N,
+      K,
+      alpha,
+      A,
+      B,
+      beta,
+      C,
+      context,
+      scratch,
+      math_type);
+}
+
+template <>
+void GemmBatched<float16, CUDAContext, TensorCoreEngine>(
+    const CBLAS_TRANSPOSE TransA,
+    const CBLAS_TRANSPOSE TransB,
+    const int A_size,
+    const int A_batches,
+    const int B_size,
+    const int B_batches,
+    const int M,
+    const int N,
+    const int K,
+    const float alpha,
+    const float16* A,
+    const float16* B,
+    const float beta,
+    float16* C,
+    CUDAContext* context,
+    Tensor<CUDAContext>* scratch,
+    TensorProto::DataType math_type) {
+  return GemmBatched<float16, CUDAContext, DefaultEngine>(
+      TransA,
+      TransB,
+      A_size,
+      A_batches,
+      B_size,
+      B_batches,
+      M,
+      N,
+      K,
+      alpha,
+      A,
+      B,
+      beta,
+      C,
+      context,
+      scratch,
+      math_type);
+}
+
+#endif // CUDA_VERSION >= 9000
 
 template <>
 void GemmEx<float, CUDAContext>(
@@ -262,7 +746,9 @@ __global__ void AddStripedBatchKernel(
   for (int j = 0; j < batch; j++) {
     const T* x = first + j * stripe;
     CUDA_1D_KERNEL_LOOP(i, N) {
-      Y[i] += x[i];
+      float tmpY = convert::To<T, float>(Y[i]);
+      tmpY += convert::To<T,float>(x[i]);
+      Y[i] = convert::To<float,T>(tmpY);
     }
   }
 }
@@ -285,7 +771,7 @@ __global__ void AddStripedBatchKernel(
   }
 
 CAFFE2_SPECIALIZED_CUDA_ADD_STRIPED_BATCH(float);
-CAFFE2_SPECIALIZED_CUDA_ADD_STRIPED_BATCH(double);
+CAFFE2_SPECIALIZED_CUDA_ADD_STRIPED_BATCH(float16);
 #undef CAFFE2_SPECIALIZED_CUDA_ADD_STRIPED_BATCH
 
 template <>
@@ -329,10 +815,8 @@ void Gemv<float16, CUDAContext>(
         CUDA_R_16F,
         LDC));
   } else if (math_type == TensorProto_DataType_FLOAT16) {
-    __half alpha_fp16;
-    alpha_fp16.x = convert::To<float, float16>(alpha).x;
-    __half beta_fp16;
-    beta_fp16.x = convert::To<float, float16>(beta).x;
+    auto alpha_fp16 = convert::floatToHalf(alpha);
+    auto beta_fp16 = convert::floatToHalf(beta);
 
     CUBLAS_CHECK(cublasHgemm(
         context->cublas_handle(),
@@ -556,28 +1040,51 @@ __global__ void SumKernel(const int N, const T* X, T* Y, bool square) {
 // device reduce is slower for N <= 10000.
 #define DEVICE_REDUCE_SIZE_THRESHOLD 10000
 
+namespace {
+
+template <typename T>
+__global__ void SumConvertKernel(float* sum, T* dest) {
+  *dest = convert::To<float, T>(*sum);
+}
+
+template <typename FloatIterT>
+void SumFloatIter(
+    const int N,
+    FloatIterT it,
+    float*& dest,
+    CUDAContext* context,
+    Tensor<CUDAContext>* scratch_ptr) {
+  size_t memRequired = 0;
+  cub::DeviceReduce::Sum(
+      nullptr, memRequired, it, dest, N, context->cuda_stream());
+  auto buffer_size =
+      static_cast<TIndex>((memRequired + sizeof(float) - 1) / sizeof(float));
+  if (!dest) {
+    // allocate one more float at the end of scratch for dest
+    scratch_ptr->Resize(std::vector<TIndex>{buffer_size + 1});
+    dest = scratch_ptr->template mutable_data<float>() + buffer_size;
+  } else {
+    scratch_ptr->Resize(std::vector<TIndex>{buffer_size});
+  }
+  cub::DeviceReduce::Sum(
+      static_cast<void*>(scratch_ptr->template mutable_data<float>()),
+      memRequired,
+      it,
+      dest,
+      N,
+      context->cuda_stream());
+}
+} // namespace
+
 template <>
 void Sum<float, CUDAContext>(
-  const int N, const float* x, float* y, CUDAContext* context,
-  Tensor<CUDAContext>* scratch_ptr) {
+    const int N,
+    const float* x,
+    float* y,
+    CUDAContext* context,
+    Tensor<CUDAContext>* scratch_ptr) {
   if (scratch_ptr && N > DEVICE_REDUCE_SIZE_THRESHOLD) {
-    size_t memRequired = 0;
-    cub::DeviceReduce::Sum(
-      nullptr,
-      memRequired,
-      x,
-      y,
-      N,
-      context->cuda_stream());
-    scratch_ptr->Resize(
-      std::vector<TIndex>{static_cast<TIndex>(memRequired)});
-    cub::DeviceReduce::Sum(
-      scratch_ptr->template mutable_data<char>(),
-      memRequired,
-      x,
-      y,
-      N,
-      context->cuda_stream());
+    SumFloatIter(N, x, y, context, scratch_ptr);
   } else {
     SumKernel<<<1, SUM_KERNEL_NTHREADS, 0, context->cuda_stream()>>>(
       N, x, y, false);
@@ -591,66 +1098,89 @@ struct FloatTransform {
     return convert::To<T, float>(v);
   }
 };
+} // namespace
 
-template <typename T>
-__global__ void SumConvertKernel(float* sum, T* dest) {
-  *dest = convert::To<float, T>(*sum);
-}
-}  // namespace
-
-#define CAFFE2_MATH_SUM_FUNC(T)                                         \
-  template <>                                                           \
-  void Sum<T, CUDAContext>(                                             \
-    const int N, const T* x, T* y, CUDAContext* context,                \
-    Tensor<CUDAContext>* scratch_ptr) {                                 \
-    if (scratch_ptr && N > DEVICE_REDUCE_SIZE_THRESHOLD) {              \
-      float* sum = nullptr;                                             \
-      FloatTransform<T> transform;                                      \
-      cub::TransformInputIterator<float, FloatTransform<T>, const T*>   \
-        it(x, transform);                                               \
-      size_t memRequired = 0;                                           \
-      cub::DeviceReduce::Sum(                                           \
-        nullptr,                                                        \
-        memRequired,                                                    \
-        it,                                                             \
-        sum,                                                            \
-        N,                                                              \
-        context->cuda_stream());                                        \
-      /* allocate one more float at the end of scratch for sum */       \
-      scratch_ptr->Resize(                                              \
-        std::vector<TIndex>{static_cast<TIndex>(                        \
-            memRequired + sizeof(float))});                             \
-      auto* scratch_data = scratch_ptr->template mutable_data<char>();  \
-      sum = reinterpret_cast<float*>(scratch_data + memRequired);       \
-      cub::DeviceReduce::Sum(                                           \
-        scratch_data,                                                   \
-        memRequired,                                                    \
-        it,                                                             \
-        sum,                                                            \
-        N,                                                              \
-        context->cuda_stream());                                        \
-      SumConvertKernel<<<1, 1, 0, context->cuda_stream()>>>(            \
-        sum, y);                                                        \
-    } else {                                                            \
-      SumKernel<<<1, SUM_KERNEL_NTHREADS, 0, context->cuda_stream()>>>( \
-        N, x, y, false);                                                \
-    }                                                                   \
+#define CAFFE2_MATH_SUM_FUNC(T)                                           \
+  template <>                                                             \
+  void Sum<T, CUDAContext>(                                               \
+      const int N,                                                        \
+      const T* x,                                                         \
+      T* y,                                                               \
+      CUDAContext* context,                                               \
+      Tensor<CUDAContext>* scratch_ptr) {                                 \
+    if (scratch_ptr && N > DEVICE_REDUCE_SIZE_THRESHOLD) {                \
+      FloatTransform<T> transform;                                        \
+      cub::TransformInputIterator<float, FloatTransform<T>, const T*> it( \
+          x, transform);                                                  \
+      float* sum = nullptr;                                               \
+      SumFloatIter(N, it, sum, context, scratch_ptr);                     \
+      SumConvertKernel<<<1, 1, 0, context->cuda_stream()>>>(sum, y);      \
+    } else {                                                              \
+      SumKernel<<<1, SUM_KERNEL_NTHREADS, 0, context->cuda_stream()>>>(   \
+          N, x, y, false);                                                \
+    }                                                                     \
   }
 
 CAFFE2_MATH_SUM_FUNC(float16)
 #undef CAFFE2_MATH_SUM_FUNC
-#undef DEVICE_REDUCE_SIZE_THRESHOLD
 
-#define CAFFE2_MATH_SUMSQR_FUNC(T)                                    \
-  template <>                                                         \
-  void SumSqr<T, CUDAContext>(                                        \
-      const int N, const T* x, T* y, CUDAContext* context) {          \
-    SumKernel<<<1, SUM_KERNEL_NTHREADS, 0, context->cuda_stream()>>>( \
-        N, x, y, true);                                               \
+namespace {
+template <typename T>
+struct SqrTransform {
+  inline __host__ __device__ T operator()(const T v) const {
+    return v * v;
+  }
+};
+} //  namespace
+
+template <>
+void SumSqr<float, CUDAContext>(
+    const int N,
+    const float* x,
+    float* y,
+    CUDAContext* context,
+    Tensor<CUDAContext>* scratch_ptr) {
+  if (scratch_ptr && N > DEVICE_REDUCE_SIZE_THRESHOLD) {
+    SqrTransform<float> transform;
+    cub::TransformInputIterator<float, SqrTransform<float>, const float*> it(
+        x, transform);
+    SumFloatIter(N, it, y, context, scratch_ptr);
+  } else {
+    SumKernel<<<1, SUM_KERNEL_NTHREADS, 0, context->cuda_stream()>>>(
+        N, x, y, true);
+  }
+}
+
+#define CAFFE2_MATH_SUMSQR_FUNC(T)                                      \
+  template <>                                                           \
+  void SumSqr<T, CUDAContext>(                                          \
+      const int N,                                                      \
+      const T* x,                                                       \
+      T* y,                                                             \
+      CUDAContext* context,                                             \
+      Tensor<CUDAContext>* scratch_ptr) {                               \
+    if (scratch_ptr && N > DEVICE_REDUCE_SIZE_THRESHOLD) {              \
+      FloatTransform<T> float_transform;                                \
+      cub::TransformInputIterator<float, FloatTransform<T>, const T*>   \
+          float_it(x, float_transform);                                 \
+      SqrTransform<float> sqr_transform;                                \
+      cub::TransformInputIterator<                                      \
+          float,                                                        \
+          SqrTransform<float>,                                          \
+          decltype(float_it)>                                           \
+          it(float_it, sqr_transform);                                  \
+      float* sum = nullptr;                                             \
+      SumFloatIter(N, it, sum, context, scratch_ptr);                   \
+      SumConvertKernel<<<1, 1, 0, context->cuda_stream()>>>(sum, y);    \
+    } else {                                                            \
+      SumKernel<<<1, SUM_KERNEL_NTHREADS, 0, context->cuda_stream()>>>( \
+          N, x, y, true);                                               \
+    }                                                                   \
   }
 
-CAFFE2_MATH_SUMSQR_FUNC(float)
+CAFFE2_MATH_SUMSQR_FUNC(float16)
 #undef CAFFE2_MATH_SUMSQR_FUNC
+#undef DEVICE_REDUCE_SIZE_THRESHOLD
 
 namespace {
 template <typename T>
@@ -1467,6 +1997,22 @@ void CopyMatrix<CUDAContext>(
                     cudaMemcpyDeviceToDevice, context->cuda_stream());
 }
 
+template <>
+void CopyVector<float, CUDAContext>(
+    const int N,
+    const float* src,
+    float* dst,
+    CUDAContext* context) {
+  if (src != dst && N > 0) {
+    cudaMemcpyAsync(
+        dst,
+        src,
+        sizeof(float) * N,
+        cudaMemcpyDeviceToDevice,
+        context->cuda_stream());
+  }
+}
+
 namespace {
 __global__ void rowwise_max_kernel(
     const int rows,
@@ -1541,6 +2087,29 @@ void ColwiseMax(
       CAFFE_CUDA_NUM_THREADS,
       0,
       context->cuda_stream()>>>(N, D, x, y);
+}
+
+namespace {
+__global__ void
+maximum_kernel(const int N, const float alpha, const float* x, float* y) {
+  CUDA_1D_KERNEL_LOOP(i, N) {
+    y[i] = fmaxf(x[i], alpha);
+  }
+}
+} // namespace
+
+template <>
+void Maximum(
+    const int N,
+    const float alpha,
+    const float* x,
+    float* y,
+    CUDAContext* context) {
+  maximum_kernel<<<
+      std::min(N, CAFFE_MAXIMUM_NUM_BLOCKS),
+      CAFFE_CUDA_NUM_THREADS,
+      0,
+      context->cuda_stream()>>>(N, alpha, x, y);
 }
 
 }  // namespace math

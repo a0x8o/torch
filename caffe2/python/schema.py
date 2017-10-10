@@ -57,9 +57,16 @@ def _normalize_field(field_or_type_or_blob, keep_blobs=True):
 
 FeatureSpec = namedtuple(
     'FeatureSpec',
-    ['feature_type', 'feature_names', 'feature_ids', 'feature_is_request_only']
+    [
+        'feature_type',
+        'feature_names',
+        'feature_ids',
+        'feature_is_request_only',
+        'desired_hash_size',
+    ]
 )
-FeatureSpec.__new__.__defaults__ = (None, None, None, None)
+
+FeatureSpec.__new__.__defaults__ = (None, None, None, None, None)
 
 
 class Metadata(
@@ -290,8 +297,6 @@ class Struct(Field):
         fields = [(name, _normalize_field(field)) for name, field in fields]
         self.fields = OrderedDict()
         for name, field in fields:
-            # if name == 'dense':
-            #     import pdb; pdb.set_trace()
             if FIELD_SEPARATOR in name:
                 name, field = self._struct_from_nested_name(name, field)
             if name not in self.fields:
@@ -840,8 +845,10 @@ class _SchemaNode(object):
         map_names = ['lengths', 'keys', 'values']
 
         if len(self.children) == 0 or self.field is not None:
-            assert self.field is not None
-            return self.field
+            if self.field is None:
+                return Struct()
+            else:
+                return self.field
 
         child_names = []
         for child in self.children:
@@ -1070,6 +1077,7 @@ def InitEmptyRecord(net, schema_or_record, enforce_types=False):
             shape = [0] + list(blob_type.shape)
             net.ConstantFill([], blob, shape=shape, dtype=data_type)
         except TypeError:
+            logger.warning("Blob {} has type error".format(blob))
             # If data_type_for_dtype doesn't know how to resolve given numpy
             # type to core.DataType, that function can throw type error (for
             # example that would happen for cases of unknown types such as

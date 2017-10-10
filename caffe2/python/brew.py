@@ -44,6 +44,7 @@ class HelperWrapper(object):
         'spatial_bn': spatial_bn,
         'relu': relu,
         'prelu': prelu,
+        'tanh': tanh,
         'concat': concat,
         'depth_concat': depth_concat,
         'sum': sum,
@@ -59,6 +60,8 @@ class HelperWrapper(object):
         'video_input': video_input,
         'add_weight_decay': add_weight_decay,
         'elementwise_linear': elementwise_linear,
+        'layer_norm': layer_norm,
+        'batch_mat_mul' : batch_mat_mul,
     }
 
     def __init__(self, wrapped):

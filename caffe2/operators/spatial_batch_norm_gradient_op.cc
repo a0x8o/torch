@@ -22,8 +22,8 @@ bool SpatialBNGradientOp<CPUContext>::RunOnDevice() {
 
   const int sample_size = H * W * D;
 
-  DCHECK_EQ(scale.ndim(), 1);
-  DCHECK_EQ(scale.dim32(0), C);
+  CAFFE_ENFORCE_EQ(scale.ndim(), 1);
+  CAFFE_ENFORCE_EQ(scale.dim32(0), C);
 
   ConstEigenVectorArrayMap<float> scale_arr(scale.data<float>(), C);
   ConstEigenVectorArrayMap<float> mean_arr(Input(SAVED_MEAN).data<float>(), C);
@@ -112,12 +112,9 @@ class GetSpatialBNGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
   vector<OperatorDef> GetGradientDefs() override {
     // Check if we are in training or testing mode.
-    bool is_test = false;
-    if (HasArgument(def_, "is_test")) {
-      const auto& arg = GetArgument(def_, "is_test");
-      CAFFE_ENFORCE(arg.has_i());
-      is_test = arg.i();
-    }
+    bool is_test =
+        ArgumentHelper::GetSingleArgument(def_, OpSchema::Arg_IsTest, 0);
+
     vector<string> grad_outputs{GI(0), GI(1), GI(2)};
     vector<string> grad_inputs;
     if (is_test) {

@@ -1,7 +1,7 @@
 #include "caffe2/operators/piecewise_linear_transform_op.h"
 
 namespace caffe2 {
-namespace {
+
 REGISTER_CPU_OPERATOR(
     PiecewiseLinearTransform,
     PiecewiseLinearTransformOp<float, CPUContext>);
@@ -81,5 +81,4 @@ bound.
         "containing transformed predictions");
 
 SHOULD_NOT_DO_GRADIENT(PiecewiseLinearTransform);
-} // namespace
 } // namespace caffe2

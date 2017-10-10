@@ -72,7 +72,7 @@ struct Reporter {
 // Returns a function that returns `true` if we should continue
 // iterating, given the current iteration count.
 std::function<bool(int64_t)> getContinuationTest(
-    Workspace* ws,
+    Workspace* /*ws*/,
     const ExecutionStep& step) {
   if (step.has_should_stop_blob()) {
     CAFFE_ENFORCE(
@@ -93,7 +93,7 @@ std::function<bool(int64_t)> getContinuationTest(
     if (onlyOnce) {
       return [](int64_t i) { return i == 0; };
     } else {
-      return [](int64_t i) { return true; };
+      return [](int64_t /*i*/) { return true; };
     }
   }
 };
@@ -167,7 +167,7 @@ struct ExecutionStepWrapper {
     CompiledGuard() {}
     std::unique_ptr<CompiledExecutionStep> compiled_;
     CompiledExecutionStep* compiledRef_;
-    friend class ExecutionStepWrapper;
+    friend struct ExecutionStepWrapper;
   };
 
   const ExecutionStep& step() {
@@ -463,7 +463,15 @@ bool RunPlanOnWorkspace(
     LOG(INFO) << "Step " << step.name() << " took " << step_timer.Seconds()
               << " seconds.";
   }
-  LOG(INFO) << "Total plan took " << plan_timer.Seconds() << " seconds.";
+  float exec_time = plan_timer.Seconds();
+
+#ifndef CAFFE2_MOBILE
+  PlanExecutionTime plan_stat(plan.name());
+  CAFFE_EVENT(
+      plan_stat, plan_execution_time_ns, (long)(exec_time * 1000000000));
+#endif // CAFFE2_MOBILE
+
+  LOG(INFO) << "Total plan took " << exec_time << " seconds.";
   LOG(INFO) << "Plan executed successfully.";
   return true;
 }

@@ -5,7 +5,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from caffe2.proto.caffe2_pb2 import OperatorDef
+from caffe2.proto.caffe2_pb2 import OperatorDef, NetDef
 from caffe2.python.checkpoint import Job
 from caffe2.python.core import Net, ExecutionStep, Plan
 from caffe2.python.task import Task, TaskGroup, WorkspaceType, TaskOutput
@@ -194,7 +194,7 @@ def _sanitize_str(s):
     if len(sanitized) < 64:
         return sanitized
     else:
-        return s[:64] + '...<+len=%d>' % (len(s) - 64)
+        return sanitized[:64] + '...<+len=%d>' % (len(sanitized) - 64)
 
 
 def _arg_val(arg):
@@ -260,11 +260,16 @@ def print_op(text, op):
         factor_prefixes=text.factor_prefixes))
 
 
+@Printer.register(NetDef)
+def print_net_def(text, net_def):
+    text.add('# net: %s' % net_def.name)
+    for op in net_def.op:
+        text(op)
+
+
 @Printer.register(Net)
 def print_net(text, net):
-    text.add('# net: %s' % str(net))
-    for op in net.Proto().op:
-        text(op)
+    text(net.Proto())
 
 
 def _get_step_context(step):

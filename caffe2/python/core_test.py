@@ -10,6 +10,7 @@ import numpy as np
 
 from caffe2.proto import caffe2_pb2
 from caffe2.python import core, workspace, test_util
+from caffe2.python.task import Node, Task
 
 
 class TestScopes(test_util.TestCase):
@@ -429,6 +430,39 @@ class TestOperatorTraceback(test_util.TestCase):
         self.op_name_check(net, cf, line)
 
 
+class TestCreatePlan(test_util.TestCase):
+
+    def test_create_plan_from_proto_correctly(self):
+        from caffe2.python.net_builder import ops
+        with Node('trainer'), Task(name='my_task', num_instances=2) as task:
+            with ops.task_init():
+                globl = ops.Const(0)
+            with ops.task_instance_init():
+                local = ops.Const(0)
+            with ops.loop(100):
+                ops.Copy(globl, local)
+            with ops.task_instance_exit():
+                ops.Add([globl, local], [globl])
+            with ops.task_exit():
+                ops.Mul([globl, globl], [globl])
+
+        plan = core.Plan(task.get_step())
+        test_plan = core.Plan.create_from_proto(plan.Proto())
+
+        self.assertEqual(len(plan.Steps()), 1)
+        self.assertEqual(len(test_plan.Steps()), 1)
+        self.assertEqual(plan.Steps()[0].Name(), test_plan.Steps()[0].Name())
+
+        self.assertEqual(len(plan.Nets()), len(test_plan.Nets()))
+        for idx in range(0, len(plan.Nets())):
+            # When we create Net for test_plan, we will end up with new Net
+            # name with postfix.
+            net_1 = plan.Nets()[idx]
+            net_2 = test_plan.Nets()[idx]
+            trim_size = len(net_1.Name())
+            self.assertEqual(net_1.Name(), net_2.Name()[:trim_size])
+
+
 @unittest.skipIf(not workspace.has_gpu_support, 'No GPU support')
 class TestInferDevice(test_util.TestCase):
 
@@ -522,9 +556,11 @@ class TestInferDevice(test_util.TestCase):
         device_option.cuda_gpu_id = 1
         weight = init_net.XavierFill([], 'fc_w', shape=[10, 100])
         bias = init_net.ConstantFill([], 'fc_b', shape=[10, ])
-
+        const = init_net.ConstantFill([], 'const', shape=[], value=1.)
         with core.DeviceScope(device_option):
-            net.FC(["data", weight, bias], "fc1")
+            const = init_net.Add([const, const], [const])
+            fc_out = net.FC(["data", weight, bias], "fc1")
+            net.Add([fc_out, const], [fc_out])
 
         data_remap = {'data': device_option}
         nets, _ = core.InjectDeviceCopiesAmongNets(
@@ -547,6 +583,13 @@ class TestInferDevice(test_util.TestCase):
         self.assertEqual(op.input[2], "fc_b_cuda_1")
         self.assertEqual(op.device_option.device_type, 1)
         self.assertEqual(op.device_option.cuda_gpu_id, 1)
+        op = nets[1]._net.op[3]
+        self.assertEqual(op.type, "Add")
+        self.assertEqual(op.input[0], "fc1")
+        self.assertEqual(op.input[1], "const_cuda_1")
+        # check that moved blob is in input to the new net
+        for c in ["data", "fc_w", "fc_b", "const_cuda_1"]:
+            self.assertTrue(c in nets[1]._net.external_input)
         """
 For reference, net.Proto() should be like:
 name: ""
@@ -582,9 +625,22 @@ op {
     cuda_gpu_id: 1
   }
 }
+op {
+  input: "fc1"
+  input: "const_cuda_1"
+  output: "fc1"
+  name: ""
+  type: "Add"
+  device_option {
+    device_type: 1
+    cuda_gpu_id: 1
+  }
+}
 external_input: "data"
 external_input: "fc_w"
 external_input: "fc_b"
+external_input: "const"
+external_input: "const_cuda_1"
 """
 
     def test_cross_nets_no_change(self):
@@ -787,6 +843,10 @@ external_input: "data"
         self.assertEqual(op.input[0], 'param_cuda_1')
 
         net.Relu('nonsense_input', 'moment')
+        # should not raise inplace error
+        core.InjectCrossDeviceCopies(net)
+        with core.DeviceScope(device_option):
+            net.Relu('nonsense_input_gpu', 'moment')
         with self.assertRaises(RuntimeError):
             core.InjectCrossDeviceCopies(net)
 

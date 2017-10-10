@@ -12,10 +12,11 @@ __global__ void AdagradUpdate(
     float* nw,
     float* nh,
     float epsilon,
+    float decay,
     const float* lr) {
   CUDA_1D_KERNEL_LOOP(i, N) {
     float gi = g[i];
-    float hi = nh[i] = h[i] + gi * gi;
+    float hi = nh[i] = decay * h[i] + gi * gi;
     nw[i] = w[i] + lr[0] * gi / (std::sqrt(hi) + epsilon);
   }
 }
@@ -29,13 +30,14 @@ void adagrad_update<CUDAContext>(
     float* nw,
     float* nh,
     float epsilon,
+    float decay,
     const float* lr,
     CUDAContext* context) {
   AdagradUpdate<<<
       CAFFE_GET_BLOCKS(N),
       CAFFE_CUDA_NUM_THREADS,
       0,
-      context->cuda_stream()>>>(N, w, g, h, nw, nh, epsilon, lr);
+      context->cuda_stream()>>>(N, w, g, h, nw, nh, epsilon, decay, lr);
 }
 
 template <typename SIndex>
@@ -69,6 +71,11 @@ bool SparseAdagradOp<float, CUDAContext>::DoRunWithType()
   auto N = Input(GRAD).size();
   auto grad_slice_sz = Input(GRAD).size_from_dim(Input(INDICES).ndim());
 
+  if (N == 0) {
+    // empty grad, nothing to do here, not even launching the kernel
+    return true;
+  }
+
   SparseAdagradKernel<SIndex><<<
     CAFFE_GET_BLOCKS(N), CAFFE_CUDA_NUM_THREADS, 0,
     context_.cuda_stream()>>>(
@@ -81,8 +88,6 @@ bool SparseAdagradOp<float, CUDAContext>::DoRunWithType()
   return true;
 }
 
-namespace {
 REGISTER_CUDA_OPERATOR(Adagrad, AdagradOp<float, CUDAContext>);
 REGISTER_CUDA_OPERATOR(SparseAdagrad, SparseAdagradOp<float, CUDAContext>);
-}
 }
