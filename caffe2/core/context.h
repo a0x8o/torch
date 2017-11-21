@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_CORE_CONTEXT_H_
 #define CAFFE2_CORE_CONTEXT_H_
 
@@ -79,9 +95,10 @@ class CPUContext final {
   inline void WaitEvent(const Event& ev) {
     ev.Wait(CPU, this);
   }
-  inline void Record(Event* ev) const {
+
+  inline void Record(Event* ev, const char* err_msg = nullptr) const {
     CAFFE_ENFORCE(ev, "Event must not be null.");
-    ev->Record(CPU, this);
+    ev->Record(CPU, this, err_msg);
   }
 
   inline void FinishDeviceComputation() {}
@@ -109,9 +126,10 @@ class CPUContext final {
   template <typename T, class SrcContext, class DstContext>
   inline void Copy(size_t n, const T* src, T* dst) {
     if (std::is_fundamental<T>::value) {
-      CopyBytes<SrcContext, DstContext>(n * sizeof(T),
-                                     static_cast<const void*>(src),
-                                     static_cast<void*>(dst));
+      CopyBytes<SrcContext, DstContext>(
+          n * sizeof(T),
+          static_cast<const void*>(src),
+          static_cast<void*>(dst));
     } else {
       for (int i = 0; i < n; ++i) {
         dst[i] = src[i];
@@ -127,6 +145,15 @@ class CPUContext final {
     } else {
       CopyBytes<SrcContext, DstContext>(n * meta.itemsize(), src, dst);
     }
+  }
+
+  // By default CPU operators don't have async device parts
+  static bool HasAsyncPartDefault() {
+    return false;
+  }
+
+  static bool SupportsAsyncScheduling() {
+    return false;
   }
 
  protected:

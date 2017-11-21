@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <cub/device/device_reduce.cuh>
 #include <cub/device/device_scan.cuh>
 #include "caffe2/core/context_gpu.h"
@@ -73,7 +89,7 @@ class ReduceDimsOp : public Operator<CUDAContext> {
     const auto* input_data = input.template data<T>();
     auto* Y = Output(0);
 
-    CHECK_LT(num_reduce_dims_, input.dims().size());
+    CHECK_LE(num_reduce_dims_, input.dims().size());
     const int M = FIRSTDIMS
         ? input.size_to_dim(num_reduce_dims_)
         : input.size_to_dim(input.ndim() - num_reduce_dims_);

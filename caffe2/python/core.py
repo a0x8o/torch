@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package core
 # Module caffe2.python.core
 from __future__ import absolute_import
@@ -16,7 +31,6 @@ from caffe2.python import scope, utils, workspace
 from caffe2.python.control_ops_grad import gen_do_gradient, gen_if_gradient
 
 import caffe2.python._import_c_extension as C
-import google.protobuf.text_format as protobuftx
 import pickle
 import numpy as np
 import sys
@@ -71,20 +85,35 @@ def GetGlobalInitArgs():
 
 
 def IsOperator(op_type):
-    return (op_type in _REGISTERED_OPERATORS)
+    return IsOperatorWithEngine(op_type, engine='DEFAULT')
 
 
 def IsOperatorWithEngine(op_type, engine):
-    return (op_type + "_ENGINE_" + engine in _REGISTERED_OPERATORS)
+    return C.op_registry_key(op_type, engine) in _REGISTERED_OPERATORS
 
 
-def DeviceOption(device_type, cuda_gpu_id=0, random_seed=None):
+def DeviceOption(device_type, cuda_gpu_id=0, random_seed=None, node_name=None):
     option = caffe2_pb2.DeviceOption()
     option.device_type = device_type
     option.cuda_gpu_id = cuda_gpu_id
+    if node_name is not None:
+        option.node_name = node_name
     if random_seed is not None:
         option.random_seed = random_seed
     return option
+
+
+def device_option_equal(opt1, opt2, ignore_node_name=True, ignore_random_seed=True):
+    if not opt1 or not opt2:
+        return opt1 == opt2
+    if not ignore_node_name and opt1.node_name != opt2.node_name:
+        return False
+    if not ignore_random_seed and opt1.random_seed != opt2.random_seed:
+        return False
+    if not opt1.device_type or not opt2.device_type:
+        # At least one option is for CPU, check if both are for CPU.
+        return not opt1.device_type and not opt2.device_type
+    return opt1.cuda_gpu_id == opt2.cuda_gpu_id
 
 
 def InferBlobDevices(net):
@@ -803,8 +832,9 @@ StopGradient. Op:\n\n{}""".format(op.output[0], str(op)))
 
         # Check if all grad op device options are the same.
         if len(all_device_options) >= 2 and not all(
-                d == all_device_options[0] for d in all_device_options[1:]):
-            raise RuntimeError('Unexpected behavior: not all grad ops'
+                device_option_equal(d, all_device_options[0])
+                for d in all_device_options[1:]):
+            raise RuntimeError('Unexpected behavior: not all grad ops '
                                'have the same device option.')
         return True
 
@@ -1047,8 +1077,8 @@ class GradientRegistry(object):
                 )
             else:
                 raise Exception(
-                    "Exception when creating the gradient for [{}]: {}.".
-                    format(op.type, e)
+                    "Exception when creating gradient for [{}]:{}.\nOp: \n{}".
+                    format(op.type, e, str(op))
                 )
 
         if gradient_ops is None:
@@ -1225,16 +1255,14 @@ DEFAULT_REMAP_FUNCS = {
 
 
 def remap_proto(argument, blob_remap):
-    proto = caffe2_pb2.NetDef()
-    protobuftx.Merge(argument.s.decode('utf-8'), proto)
-    subnet = Net(proto)
+    subnet = Net(argument.n)
 
     cloned_sub_net = subnet.Clone(
         'cloned_sub_net',
         blob_remap,
     )
 
-    argument.s = str(cloned_sub_net.Proto()).encode('utf-8')
+    argument.n.CopyFrom(cloned_sub_net.Proto())
 
 
 def clone_and_bind_net(net, name, prefix, blob_remap=None, inputs=None,
@@ -1853,6 +1881,16 @@ class Net(object):
         return self.AddExternalOutput(
             * [ScopedBlobReference(b) for b in outputs]
         )
+
+    # This returns a reference to the observer
+    def AddObserver(self, observer_type):
+        return C.add_observer_to_net(self._net.name, observer_type)
+
+    def RemoveObserver(self, observer):
+        C.remove_observer_from_net(self._net.name, observer)
+
+    def NumObservers(self):
+        return C.num_observers_on_net(self._net.name)
 
     @property
     def external_inputs(self):

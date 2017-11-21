@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 # Module caffe2.python.examples.resnet50_trainer
 from __future__ import absolute_import
 from __future__ import division
@@ -13,6 +28,7 @@ import os
 from caffe2.python import core, workspace, experiment_util, data_parallel_model
 from caffe2.python import dyndep, optimizer
 from caffe2.python import timeout_guard, model_helper, brew
+from caffe2.proto import caffe2_pb2
 
 import caffe2.python.models.resnet as resnet
 from caffe2.python.modeling.initializers import Initializer, pFP16Initializer
@@ -45,7 +61,7 @@ dyndep.InitOpsLibrary('@/caffe2/caffe2/distributed:file_store_handler_ops')
 dyndep.InitOpsLibrary('@/caffe2/caffe2/distributed:redis_store_handler_ops')
 
 
-def AddImageInput(model, reader, batch_size, img_size, dtype):
+def AddImageInput(model, reader, batch_size, img_size, dtype, is_test):
     '''
     The image input operator loads image and label data from the reader and
     applies transformations to the images (random cropping, mirroring, ...).
@@ -61,7 +77,8 @@ def AddImageInput(model, reader, batch_size, img_size, dtype):
         std=128.,
         scale=256,
         crop=img_size,
-        mirror=1
+        mirror=1,
+        is_test=is_test,
     )
 
     data = model.StopGradient(data, data)
@@ -73,12 +90,15 @@ def AddNullInput(model, reader, batch_size, img_size, dtype):
     input. A label blob is hardcoded to a single value. This is useful if you
     want to test compute throughput or don't have a dataset available.
     '''
+    suffix = "_fp16" if dtype == "float16" else ""
     model.param_init_net.GaussianFill(
         [],
-        ["data"],
+        ["data" + suffix],
         shape=[batch_size, 3, img_size, img_size],
-        dtype=dtype,
     )
+    if dtype == "float16":
+        model.param_init_net.FloatToHalf("data" + suffix, "data")
+
     model.param_init_net.ConstantFill(
         [],
         ["label"],
@@ -131,8 +151,17 @@ def LoadModel(path, model):
 
     predict_init_net.RunAllOnGPU()
     init_net.RunAllOnGPU()
+
     assert workspace.RunNetOnce(predict_init_net)
     assert workspace.RunNetOnce(init_net)
+
+    # Hack: fix iteration counter which is in CUDA context after load model
+    itercnt = workspace.FetchBlob("optimizer_iteration")
+    workspace.FeedBlob(
+        "optimizer_iteration",
+        itercnt,
+        device_option=core.DeviceOption(caffe2_pb2.CPU, 0)
+    )
 
 
 def RunEpoch(
@@ -312,7 +341,8 @@ def Train(args):
         with brew.arg_scope([brew.conv, brew.fc],
                             WeightInitializer=initializer,
                             BiasInitializer=initializer,
-                            enable_tensor_core=args.enable_tensor_core):
+                            enable_tensor_core=args.enable_tensor_core,
+                            float16_compute=args.float16_compute):
             pred = resnet.create_resnet50(
                 model,
                 "data",
@@ -333,16 +363,30 @@ def Train(args):
 
     def add_optimizer(model):
         stepsz = int(30 * args.epoch_size / total_batch_size / num_shards)
-        optimizer.add_weight_decay(model, args.weight_decay)
-        opt = optimizer.build_multi_precision_sgd(
-            model,
-            args.base_learning_rate,
-            momentum=0.9,
-            nesterov=1,
-            policy="step",
-            stepsize=stepsz,
-            gamma=0.1
-        )
+
+        if args.float16_compute:
+            # TODO: merge with multi-prceision optimizer
+            opt = optimizer.build_fp16_sgd(
+                model,
+                args.base_learning_rate,
+                momentum=0.9,
+                nesterov=1,
+                weight_decay=args.weight_decay,   # weight decay included
+                policy="step",
+                stepsize=stepsz,
+                gamma=0.1
+            )
+        else:
+            optimizer.add_weight_decay(model, args.weight_decay)
+            opt = optimizer.build_multi_precision_sgd(
+                model,
+                args.base_learning_rate,
+                momentum=0.9,
+                nesterov=1,
+                policy="step",
+                stepsize=stepsz,
+                gamma=0.1
+            )
         return opt
 
     # Define add_image_input function.
@@ -373,6 +417,7 @@ def Train(args):
                 batch_size=batch_per_device,
                 img_size=args.image_size,
                 dtype=args.dtype,
+                is_test=False,
             )
 
     def add_post_sync_ops(model):
@@ -427,6 +472,7 @@ def Train(args):
                 batch_size=batch_per_device,
                 img_size=args.image_size,
                 dtype=args.dtype,
+                is_test=True,
             )
 
         data_parallel_model.Parallelize(
@@ -545,6 +591,8 @@ def main():
     parser.add_argument('--dtype', default='float',
                         choices=['float', 'float16'],
                         help='Data type used for training')
+    parser.add_argument('--float16_compute', action='store_true',
+                        help="Use float 16 compute, if available")
     parser.add_argument('--enable-tensor-core', action='store_true',
                         help='Enable Tensor Core math for Conv and FC ops')
     parser.add_argument("--distributed_transport", type=str, default="tcp",

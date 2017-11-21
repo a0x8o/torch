@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/boolean_mask_ops.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/core/tensor.h"
@@ -147,16 +163,60 @@ const float minf = -1.0f * std::numeric_limits<float>::infinity();
 template <typename Functor>
 void MaskWithFunctor(
     size_t N,
-    size_t D,
+    size_t M,
+    int B,
     const float* in,
     Functor fn,
     float fill_val,
     float* out) {
-  // TODO(T20952436): vector implementation
+  if (B >= 0) { // with batching
+    // collapse tensor to 3-dim view [B, N, M] where:
+    // B is product of dims up to and including batch
+    // N is product of dims between batch and axis, exclusive
+    // M is product of dimensions at/after axis
+    // then mask each batch [i, :, :] (note that this is N x M matrix)
+    for (int i = 0; i < B; ++i) {
+      for (int j = 0; j < N; ++j) {
+        for (int k = 0; k < M; ++k) {
+          // when [i, :, :] is laid out in row major order
+          // N * M * i + M * j + k is index of entry in N x M matrix
+          // with coordinates (row = j, col = k)
+          auto val = in[N * M * i + M * j + k];
+          out[N * M * i + M * j + k] = (fn(j, k, val) ? fill_val : val);
+        }
+      }
+    }
+  } else { // without batching
+    // TODO(T20952436): vector implementation
+    // collapse tensor to 2-dim view [N, M], where
+    // N is product of dimensions before axis
+    // M is product of dimensions at/after axis
+    // and mask N by M matrix
+    for (int i = 0; i < N; ++i) {
+      for (int j = 0; j < M; ++j) {
+        auto val = in[M * i + j];
+        out[M * i + j] = (fn(i, j, val) ? fill_val : val);
+      }
+    }
+  }
+}
+
+// Repeat masking along continuous segments (right axes) of size D
+template <typename Functor>
+void RepeatedMaskWithFunctor(
+    size_t N,
+    size_t M,
+    int D,
+    const float* in,
+    Functor fn,
+    float fill_val,
+    float* out) {
   for (int i = 0; i < N; ++i) {
-    for (int j = 0; j < D; ++j) {
-      auto val = in[D * i + j];
-      out[D * i + j] = (fn(i, j, val) ? fill_val : val);
+    for (int j = 0; j < M; ++j) {
+      for (int k = 0; k < D; ++k) {
+        auto val = in[M * D * i + D * j + k];
+        out[M * D * i + D * j + k] = (fn(i, j, val) ? fill_val : val);
+      }
     }
   }
 }
@@ -165,7 +225,8 @@ namespace {
 
 class SequenceFunctor {
  public:
-  explicit SequenceFunctor(const int* sl, const size_t len) : sl_(sl), len_(len) {}
+  explicit SequenceFunctor(const int* sl, const size_t len)
+      : sl_(sl), len_(len) {}
   bool operator()(int i, int j, float /* val*/) {
     CAFFE_ENFORCE(i < len_, "Out of bound.");
     return j >= sl_[i];
@@ -220,7 +281,7 @@ class LowerDiagFunctor {
 
 template <>
 bool SequenceMaskOp<CPUContext>::RunOnDevice() {
-    return DispatchHelper<TensorTypes<float>>::call(this, Input(0));
+  return DispatchHelper<TensorTypes<float>>::call(this, Input(0));
 }
 
 template <>
@@ -240,25 +301,66 @@ bool SequenceMaskOp<CPUContext>::DoRunWithType() {
   output->ResizeLike(*input);
 
   const auto canonical_axis = input->canonical_axis_index(axis_);
-  const int left = input->size_to_dim(canonical_axis);
+
+  // canonical_batch is non-negative if batching, -1 otherwise
+  int canonical_batch = -1;
+  if ((HasArgument("batch"))) {
+    canonical_batch = input->canonical_axis_index(batch_);
+  }
+
+  // make sure batch < axis
+  if (canonical_batch >= 0) {
+    CAFFE_ENFORCE_LT(canonical_batch, canonical_axis);
+  }
+
+  // if no batch, then left is product of dims up to axis
+  // otherwise, left is product of dims between batch and axis
+  const int left =
+      (canonical_batch >= 0
+           ? input->size_between_dim(canonical_batch, canonical_axis)
+           : input->size_to_dim(canonical_axis));
   const int right = input->size_from_dim(canonical_axis);
 
-  T fill_val = convert::To<float, T>(grad_ ? 0.0f : fill_val_);
+  // product of dims from 1 to batch
+  const int batch_dim =
+      (canonical_batch >= 0
+           ? input->size_to_dim(canonical_batch) * input->dim(canonical_batch)
+           : -1);
 
+  T fill_val = convert::To<float, T>(grad_ ? 0.0f : fill_val_);
   if (mode_ == "sequence") {
     CAFFE_ENFORCE(
         sequence_lengths, "Sequence length not provided for mode 'sequence'!");
-    MaskWithFunctor(
-        left,
-        right,
-        input->data<T>(),
-        SequenceFunctor(sequence_lengths->data<int>(), sequence_lengths->size()),
-        fill_val,
-        output->mutable_data<T>());
+    if (HasArgument("repeat_from_axis")) {
+      const int canonical_repeat_from =
+          input->canonical_axis_index(repeat_from_);
+      const int repeated_dims = input->size_from_dim(canonical_repeat_from);
+      const int masked_dims = right / repeated_dims;
+      RepeatedMaskWithFunctor(
+          left,
+          masked_dims,
+          repeated_dims,
+          input->data<T>(),
+          SequenceFunctor(
+              sequence_lengths->data<int>(), sequence_lengths->size()),
+          fill_val,
+          output->mutable_data<T>());
+    } else {
+      MaskWithFunctor(
+          left,
+          right,
+          batch_dim,
+          input->data<T>(),
+          SequenceFunctor(
+              sequence_lengths->data<int>(), sequence_lengths->size()),
+          fill_val,
+          output->mutable_data<T>());
+    }
   } else if (mode_ == "window") {
     MaskWithFunctor(
         left,
         right,
+        batch_dim,
         input->data<T>(),
         WindowFunctor(window_centers->data<int>(), radius_),
         fill_val,
@@ -267,6 +369,7 @@ bool SequenceMaskOp<CPUContext>::DoRunWithType() {
     MaskWithFunctor(
         left,
         right,
+        batch_dim,
         input->data<T>(),
         UpperFunctor(),
         fill_val,
@@ -275,6 +378,7 @@ bool SequenceMaskOp<CPUContext>::DoRunWithType() {
     MaskWithFunctor(
         left,
         right,
+        batch_dim,
         input->data<T>(),
         LowerFunctor(),
         fill_val,
@@ -283,6 +387,7 @@ bool SequenceMaskOp<CPUContext>::DoRunWithType() {
     MaskWithFunctor(
         left,
         right,
+        batch_dim,
         input->data<T>(),
         UpperDiagFunctor(),
         fill_val,
@@ -291,6 +396,7 @@ bool SequenceMaskOp<CPUContext>::DoRunWithType() {
     MaskWithFunctor(
         left,
         right,
+        batch_dim,
         input->data<T>(),
         LowerDiagFunctor(),
         fill_val,
@@ -310,6 +416,9 @@ OPERATOR_SCHEMA(SequenceMask)
     .NumOutputs(1)
     .SetDoc(R"DOC(
 Mask op designed for use in attention mechanisms for sequence modeling tasks.
+Supports batching: given batch_dim, collapses dims 0 through batch_dim into a
+single dimension, e.g. if tensor dims are [4,2,1,3,4] and batch_dim=2, first
+collapse tensor to [4*2*1,3,4], then mask each batch [i,:,:].
 
 Two current operating modes:
 1) Given a 2D input tensor and 1D tensor of sequence lengths, for each row i in
@@ -344,7 +453,13 @@ Two current operating modes:
         "will be treated as row indices and those to the right (inclusive) "
         "will be treated as column indices in the 2D mask")
     .Arg("grad", "(bool) operate in gradient mode")
-    .Arg("radius", "(int) radius of windows in window mode");
+    .Arg("radius", "(int) radius of windows in window mode")
+    .Arg("batch", "(int) batch dimension of tensor (optional)")
+    .Arg(
+        "repeat_from_axis",
+        "(int) used when mask should be repeated for "
+        "one or more data dimensions (beginning at this axis).  "
+        "(currently only supported for sequence mode without batch argument)");
 
 class GetSequenceMaskGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;

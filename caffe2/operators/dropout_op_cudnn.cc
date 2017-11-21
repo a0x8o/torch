@@ -1,9 +1,29 @@
-#include "caffe2/core/common_cudnn.h"
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/context_gpu.h"
+#include "caffe2/core/cudnn_wrappers.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/core/types.h"
 
 namespace caffe2 {
+
+// cudnnRestoreDropoutDescriptor is needed for correctness and
+// doesn't exist prior to cuDNN v7
+#if CUDNN_VERSION_MIN(7,0,0)
 
 class CuDNNDropoutOp final : public Operator<CUDAContext> {
  public:
@@ -14,7 +34,9 @@ class CuDNNDropoutOp final : public Operator<CUDAContext> {
         cudnn_wrapper_(&context_),
         ratio_(OperatorBase::GetSingleArgument<float>("ratio", 0.5)),
         is_test_(
-            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)) {
+            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)),
+        states_initialized_(false),
+        random_seed_(operator_def.device_option().random_seed()) {
     CAFFE_ENFORCE_GE(ratio_, 0);
     CAFFE_ENFORCE_LT(ratio_, 1);
     CUDNN_ENFORCE(cudnnCreateTensorDescriptor(&data_desc_));
@@ -58,6 +80,12 @@ class CuDNNDropoutOp final : public Operator<CUDAContext> {
 
   size_t states_size_in_bytes_, reserve_space_size_in_bytes_;
   // Input: X, Output: Y, mask_and_states
+
+  // track whether states have been initialized - only needs to happen once
+  bool states_initialized_;
+
+  // random seed
+  unsigned long long random_seed_;
 };
 
 class CuDNNDropoutGradientOp final : public Operator<CUDAContext> {
@@ -68,7 +96,9 @@ class CuDNNDropoutGradientOp final : public Operator<CUDAContext> {
         cudnn_wrapper_(&context_),
         ratio_(OperatorBase::GetSingleArgument<float>("ratio", 0.5)),
         is_test_(
-            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)) {
+            OperatorBase::GetSingleArgument<int>(OpSchema::Arg_IsTest, 0)),
+        states_initialized_(false),
+        random_seed_(operator_def.device_option().random_seed()) {
     CAFFE_ENFORCE_GE(ratio_, 0);
     CAFFE_ENFORCE_LT(ratio_, 1);
     CUDNN_ENFORCE(cudnnCreateTensorDescriptor(&data_desc_));
@@ -108,6 +138,11 @@ class CuDNNDropoutGradientOp final : public Operator<CUDAContext> {
 
   size_t states_size_in_bytes_, reserve_space_size_in_bytes_;
   // Input: dY, mask_and_states, Output: dX
+
+  // only need to initialize states once (size is static)
+  bool states_initialized_;
+
+  unsigned long long random_seed_;
 };
 
 template <typename T, typename M>
@@ -150,20 +185,23 @@ bool CuDNNDropoutOp::DoRunWithType() {
       mask->Resize(reserve_space_size_in_bytes_);
       states->Resize(states_size_in_bytes_);
 
-      // set the dropout descriptor (note: need to allocate the states data
-      // before acquiring the mutex)
-      uint8_t* states_data = states->mutable_data<uint8_t>();
-      {
-        // Need to protect  as clashes with NCCL
-        std::lock_guard<std::mutex> lk(CUDAContext::mutex());
-        CUDNN_ENFORCE(cudnnSetDropoutDescriptor(
-            dropout_desc_,
-            cudnn_wrapper_.inline_cudnn_handle(),
-            ratio_,
-            states_data,
-            states_size_in_bytes_,
-            0 // seed
-            ));
+      if (!states_initialized_) {
+        // set the dropout descriptor (note: need to allocate the states data
+        // before acquiring the mutex)
+        uint8_t* states_data = states->mutable_data<uint8_t>();
+        {
+          // Need to protect  as clashes with NCCL
+          std::lock_guard<std::mutex> lk(CUDAContext::mutex());
+          CUDNN_ENFORCE(cudnnSetDropoutDescriptor(
+              dropout_desc_,
+              cudnn_wrapper_.inline_cudnn_handle(),
+              ratio_,
+              states_data,
+              states_size_in_bytes_,
+              random_seed_
+              ));
+        }
+        states_initialized_ = true;
       }
     }
     CUDNN_ENFORCE(cudnnDropoutForward(
@@ -205,6 +243,23 @@ bool CuDNNDropoutGradientOp::DoRunWithType() {
     size_prod *= dim;
   }
 
+  if (!states_initialized_) {
+    // set the dropout descriptor
+    {
+      // Need to protect  as clashes with NCCL
+      std::lock_guard<std::mutex> lk(CUDAContext::mutex());
+      CUDNN_ENFORCE(cudnnRestoreDropoutDescriptor(
+          dropout_desc_,
+          cudnn_wrapper_.inline_cudnn_handle(),
+          ratio_,
+          const_cast<uint8_t*>(states.data<uint8_t>()),
+          states_size_in_bytes_,
+          random_seed_
+          ));
+    }
+    states_initialized_ = true;
+  }
+
   if (dY.dims() != cudnn_input_dims_) {
     cudnn_input_dims_ = dY.dims();
     CUDNN_ENFORCE(cudnnSetTensor4dDescriptor(
@@ -220,19 +275,6 @@ bool CuDNNDropoutGradientOp::DoRunWithType() {
     CUDNN_ENFORCE(cudnnDropoutGetReserveSpaceSize(
         data_desc_, &reserve_space_size_in_bytes_));
 
-    // set the dropout descriptor
-    {
-      // Need to protect  as clashes with NCCL
-      std::lock_guard<std::mutex> lk(CUDAContext::mutex());
-      CUDNN_ENFORCE(cudnnSetDropoutDescriptor(
-          dropout_desc_,
-          cudnn_wrapper_.inline_cudnn_handle(),
-          ratio_,
-          const_cast<uint8_t*>(states.data<uint8_t>()),
-          states_size_in_bytes_,
-          0 // seed
-          ));
-    }
   }
 
   // run the computation
@@ -268,5 +310,7 @@ namespace {
 REGISTER_CUDNN_OPERATOR(Dropout, CuDNNDropoutOp);
 REGISTER_CUDNN_OPERATOR(DropoutGrad, CuDNNDropoutGradientOp);
 }
+
+#endif
 
 }; // namespace caffe2

@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package layers
 # Module caffe2.python.layers.layers
 from __future__ import absolute_import
@@ -8,6 +23,7 @@ from __future__ import unicode_literals
 import logging
 from caffe2.python import core, schema, scope, workspace
 from caffe2.python.layers.tags import TagContext
+from caffe2.proto import caffe2_pb2
 
 from collections import namedtuple
 import numpy as np
@@ -34,6 +50,10 @@ def get_key(record):
 def get_categorical_limit(record):
     key = get_key(record)
     return key.metadata.categorical_limit
+
+
+def get_avg_length(record):
+    return record['lengths'].metadata.expected_value
 
 
 def set_request_only(field):
@@ -294,17 +314,28 @@ class ModelLayer(object):
             # internal.containers.RepeatedCompositeFieldContainer, but
             # the version of protobuf in fbcode does not support append
             # so extend is used
-            if param.initializer:
-                init_net._net.op.extend([param.initializer])
+            init_op = param.initializer
+            current_device_scope = scope.CurrentDeviceScope()
+            if init_op:
+                if not init_op.HasField('device_option') and\
+                        current_device_scope:
+                    init_op = caffe2_pb2.OperatorDef()
+                    init_op.CopyFrom(param.initializer)
+                    init_op.device_option.CopyFrom(current_device_scope)
+                init_net._net.op.extend([init_op])
 
     def create_param(self, param_name, shape, initializer, optimizer,
-                       ps_param=None):
+                     ps_param=None):
         with scope.NameScope(self.name, reset=True):
             param = self.model.create_param(param_name=param_name,
                                             shape=shape,
                                             initializer=initializer,
                                             optimizer=optimizer,
                                             ps_param=ps_param)
+
+            # make sure we don't share parameters in the same layer
+            assert all(param.parameter != p.parameter for p in self.params)
+
             self.params.append(param)
             return param.parameter
 
@@ -338,16 +369,17 @@ class ModelLayer(object):
                 self.add_ops(net)
 
     def add_ops(self, net):
+        # Predict layer implementation.
         raise NotImplementedError
 
     def add_eval_ops(self, net):
-        # Default train layer implementation is completely matching predict
-        # layer implementation.
+        # Default eval layer implementation is completely matching
+        # predict layer implementation.
         self.add_ops(net)
 
     def add_train_ops(self, net):
-        # Default eval layer implementation is completely matching eval
-        # layer implementation.
+        # Default train layer implementation is completely matching
+        # eval layer implementation.
         self.add_eval_ops(net)
 
     def add_ops_to_accumulate_pred(self, net):

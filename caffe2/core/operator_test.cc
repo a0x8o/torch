@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <iostream>
 
 #include "caffe2/core/net.h"
@@ -469,6 +485,24 @@ TEST(EnginePrefTest, SetOpEnginePref) {
     EXPECT_NE(nullptr, op.get());
     // operator_def takes precedence
     EXPECT_EQ(static_cast<JustTest*>(op.get())->type(), "BAR");
+  }
+  // clear
+  SetPerOpEnginePref({});
+  SetGlobalEnginePref({});
+}
+
+TEST(EnginePrefTest, SetDefaultEngine) {
+  OperatorDef op_def;
+  Workspace ws;
+  op_def.set_type("JustTest");
+
+  SetPerOpEnginePref({{DeviceType::CPU, {{"JustTest", {"DEFAULT"}}}}});
+  SetGlobalEnginePref({{DeviceType::CPU, {"BAR"}}});
+  {
+    const auto op = CreateOperator(op_def, &ws);
+    EXPECT_NE(nullptr, op.get());
+    // operator_def takes precedence
+    EXPECT_EQ(static_cast<JustTest*>(op.get())->type(), "base");
   }
   // clear
   SetPerOpEnginePref({});

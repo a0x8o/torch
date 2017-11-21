@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/filler_op.h"
 
 namespace caffe2 {
@@ -44,7 +60,7 @@ OPERATOR_SCHEMA(ConstantFill)
     .NumInputs(0, 1)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference)
+    .TensorInferenceFunction(FillerTensorInference<>)
     .SetDoc(R"DOC(
 The operator fills the elements of the output tensor with a constant value
 specified by the 'value' argument.
@@ -93,7 +109,7 @@ OPERATOR_SCHEMA(DiagonalFill)
     .NumInputs(0, 1)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference)
+    .TensorInferenceFunction(FillerTensorInference<>)
     .SetDoc(R"DOC(
 The operator fills the diagonal elements of the output tensor (>= 2D)
 with a constant value specified by the 'value' argument, and others 0. If
@@ -142,7 +158,7 @@ OPERATOR_SCHEMA(UniformFill)
     .NumInputs({0, 1, 3})
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference)
+    .TensorInferenceFunction(FillerTensorInference<>)
     .SetDoc(R"DOC(
 Fill the output tensor with FLOAT samples from uniform distribution [min, max].
 
@@ -173,7 +189,7 @@ OPERATOR_SCHEMA(UniformIntFill)
     .NumInputs({0, 1, 3})
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference)
+    .TensorInferenceFunction(FillerTensorInference<>)
     .SetDoc(R"DOC(
 Like `UniformFill` but fill with INT32.
 )DOC");
@@ -181,7 +197,7 @@ OPERATOR_SCHEMA(UniqueUniformFill)
     .NumInputs(0, 2)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference)
+    .TensorInferenceFunction(FillerTensorInference<>)
     .SetDoc(R"DOC(
 Fill the output tensor with uniform samples between min and max (inclusive).
 If the second input is given, its elements will be excluded from uniform
@@ -217,22 +233,22 @@ OPERATOR_SCHEMA(GaussianFill)
     .NumInputs(0, 1)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference);
+    .TensorInferenceFunction(FillerTensorInference<>);
 OPERATOR_SCHEMA(XavierFill)
     .NumInputs(0, 1)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference);
+    .TensorInferenceFunction(FillerTensorInference<>);
 OPERATOR_SCHEMA(MSRAFill)
     .NumInputs(0, 1)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference);
+    .TensorInferenceFunction(FillerTensorInference<>);
 OPERATOR_SCHEMA(RangeFill)
     .NumInputs(0, 1)
     .NumOutputs(1)
     .AllowInplace({{0, 0}})
-    .TensorInferenceFunction(FillerTensorInference);
+    .TensorInferenceFunction(FillerTensorInference<>);
 
 NO_GRADIENT(UniformFill);
 NO_GRADIENT(UniformIntFill);

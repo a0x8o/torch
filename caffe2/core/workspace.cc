@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/workspace.h"
 
 #include <algorithm>
@@ -113,6 +129,39 @@ Blob* Workspace::CreateBlob(const string& name) {
     blob_map_[name] = unique_ptr<Blob>(new Blob());
   }
   return GetBlob(name);
+}
+
+Blob* Workspace::CreateLocalBlob(const string& name) {
+  if (blob_map_.count(name)) {
+    VLOG(1) << "Blob " << name << " already exists. Skipping.";
+  } else {
+    VLOG(1) << "Creating blob " << name;
+    blob_map_[name] = unique_ptr<Blob>(new Blob());
+  }
+  return GetBlob(name);
+}
+
+Blob* Workspace::RenameBlob(const string& old_name, const string& new_name) {
+  // We allow renaming only local blobs for API clarity purpose
+  auto it = blob_map_.find(old_name);
+  CAFFE_ENFORCE(
+      it != blob_map_.end(),
+      "Blob ",
+      old_name,
+      " is not in the local blob list");
+
+  // New blob can't be in any parent either, otherwise it will hide a parent
+  // blob
+  CAFFE_ENFORCE(
+      !HasBlob(new_name), "Blob ", new_name, "is already in the workspace");
+
+  // First delete the old record
+  auto value = std::move(it->second);
+  blob_map_.erase(it);
+
+  auto* raw_ptr = value.get();
+  blob_map_[new_name] = std::move(value);
+  return raw_ptr;
 }
 
 bool Workspace::RemoveBlob(const string& name) {

@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/utility_ops.h"
 
 #include <cmath>
@@ -6,6 +22,11 @@ namespace caffe2 {
 
 template <>
 bool WeightedSumOp<CPUContext>::RunOnDevice() {
+  return DoRunWithType<float>();
+}
+
+template <>
+bool WeightedSumGradientOp<CPUContext>::RunOnDevice() {
   return DoRunWithType<float>();
 }
 
@@ -60,6 +81,7 @@ REGISTER_CPU_OPERATOR(Alias, AliasOp<CPUContext>);
 REGISTER_CPU_OPERATOR(ResizeLike, ResizeLikeOp<CPUContext>);
 REGISTER_CPU_OPERATOR(SumInt, SumOp<CPUContext>);
 REGISTER_CPU_OPERATOR(WeightedSum, WeightedSumOp<CPUContext>);
+REGISTER_CPU_OPERATOR(WeightedSumGradient, WeightedSumGradientOp<CPUContext>);
 REGISTER_CPU_OPERATOR(
     ScatterWeightedSum,
     ScatterWeightedSumOp<float, CPUContext>);
@@ -89,8 +111,6 @@ REGISTER_CPU_OPERATOR(LengthsToSegmentIds, LengthsToSegmentIdsOp<CPUContext>);
 REGISTER_CPU_OPERATOR(LengthsToRanges, LengthsToRangesOp<CPUContext>);
 REGISTER_CPU_OPERATOR(SegmentIdsToLengths, SegmentIdsToLengthsOp<CPUContext>);
 REGISTER_CPU_OPERATOR(SegmentIdsToRanges, SegmentIdsToRangesOp<CPUContext>);
-REGISTER_CPU_OPERATOR(Squeeze, SqueezeOp<CPUContext>);
-REGISTER_CPU_OPERATOR(ExpandDims, ExpandDimsOp<CPUContext>);
 REGISTER_CPU_OPERATOR(LengthsToWeights, LengthsToWeightsOp<CPUContext>);
 REGISTER_CPU_OPERATOR(EnsureDense, EnsureDenseOp<CPUContext>);
 REGISTER_CPU_OPERATOR(
@@ -121,34 +141,44 @@ OPERATOR_SCHEMA(LengthsToShape).NumInputs(1).NumOutputs(1);
 OPERATOR_SCHEMA(Flatten)
     .NumInputs(1)
     .NumOutputs(1)
-    .TensorInferenceFunction([](const OperatorDef&,
+    .TensorInferenceFunction([](const OperatorDef& def,
                                 const vector<TensorShape>& in) {
+      ArgumentHelper helper(def);
+      const int axis = helper.GetSingleArgument<int>("axis", 1);
       vector<TensorShape> out(1);
-      int total = 1;
+      TIndex outer = 1;
+      TIndex inner = 1;
       std::size_t index = 0;
       for (auto d : in[0].dims()) {
-        // skip the first element
-        if (index++ == 0) {
-          continue;
+        if (index < axis) {
+          outer *= d;
+        } else {
+          inner *= d;
         }
-        total *= d;
+        ++index;
       }
       out[0].set_data_type(in[0].data_type());
-      out[0].add_dims(in[0].dims(0));
-      out[0].add_dims(total);
+      out[0].add_dims(outer);
+      out[0].add_dims(inner);
       return out;
     })
     .SetDoc(R"DOC(
-Flattens the input tensor into a 2D matrix, keeping the first dimension
-unchanged.
+Flattens the input tensor into a 2D matrix. If input tensor has shape
+(d_0, d_1, ... d_n) then the output will have shape
+(d_0 X d_1 ... d_(axis-1), d_axis X d_(axis+1) ... X dn)
 )DOC")
-    .Input(0, "input", "A tensor of rank >= 2.")
+    .Input(0, "input", "A tensor of rank >= axis.")
     .Output(
         0,
         "output",
-        "A tensor of rank 2 with the contents of the input tensor, "
-        "with first dimension equal first dimension of input, and remaining "
-        "input dimensions flattened into the inner dimension of the output.");
+        "A 2D tensor with the contents of the input tensor, "
+        "with input dimensions up to axis flattened to the outer dimension "
+        "of the output and remaining input dimensions flattened into the inner "
+        "dimension of the output.")
+    .Arg(
+        "axis",
+        "(Default to 1) Indicate up to which input dimensions "
+        "(exclusive) should be flattened to the outer dimension of the output");
 
 OPERATOR_SCHEMA(FlattenToVec)
     .NumInputs(1)
@@ -238,6 +268,10 @@ only be done with X_0 also as the output, but not other X_i.
     .Input(0, "data_0", "First of the input tensors.")
     .Input(0, "weight_0", "Weight of the first input in the sum.")
     .Output(0, "output", "Result containing weighted elem-wise sum of inputs.");
+
+OPERATOR_SCHEMA(WeightedSumGradient)
+    .NumInputs([](int n) { return (n > 0 && n % 2 == 1); })
+    .NumOutputs(1, INT_MAX);
 
 OPERATOR_SCHEMA(ScatterWeightedSum)
     .NumInputs([](int n) { return (n > 3 && (n - 3) % 2 == 0); })
@@ -673,91 +707,7 @@ weights derived by lengths. i.e 1/pow(length, power)
     .Input(0, "lengths", "1-D int32_t or int64_t tensor of lengths")
     .Output(0, "a vector of weights", "1-D float tensor of weights by length");
 
-OPERATOR_SCHEMA(Squeeze)
-    .NumInputs(1)
-    .NumOutputs(1)
-    .AllowInplace({{0, 0}})
-    .SetDoc(R"DOC(
-Remove single-dimensional entries from the shape of a tensor.
-Takes a  parameter `dims` with a list of dimension to squeeze.
-If the same blob is provided in input and output, the operation is copy-free.
-This is the exact inverse operation of ExpandDims given the same `dims` arg.
-)DOC")
-    .Input(0, "data", "Tensors with at least max(dims) dimensions.")
-    .Output(0, "squeezed", "Reshaped tensor with same data as input.")
-    .TensorInferenceFunction([](const OperatorDef& def,
-                                const vector<TensorShape>& in) {
-      ArgumentHelper helper(def);
-      auto dims = helper.template GetRepeatedArgument<int>("dims");
-      auto originalSize = dims.size();
-      std::sort(dims.begin(), dims.end());
-      dims.erase(std::unique(dims.begin(), dims.end()), dims.end());
-      if (dims.size() < originalSize) {
-        LOG(WARNING) << "Parameter `dims` has repeated dimensions.";
-      }
-      CAFFE_ENFORCE(dims.front() >= 0, "Dimension ids must be non-negative.");
 
-      vector<TensorShape> out(1);
-      std::vector<int> newDims =
-          SqueezeOp<CPUContext>::ComputeDims(GetDimsVector(in[0]), dims);
-      out[0] = CreateTensorShape(newDims, in[0].data_type());
-      return out;
-    });
-
-OPERATOR_SCHEMA(ExpandDims)
-    .NumInputs(1)
-    .NumOutputs(1)
-    .AllowInplace({{0, 0}})
-    .TensorInferenceFunction([](const OperatorDef& def,
-                                const vector<TensorShape>& in) {
-      ArgumentHelper helper(def);
-      auto dims = helper.template GetRepeatedArgument<int>("dims");
-      auto originalSize = dims.size();
-      CAFFE_ENFORCE(originalSize > 0, "Parameter `dims` must be provided.");
-
-      std::sort(dims.begin(), dims.end());
-      dims.erase(std::unique(dims.begin(), dims.end()), dims.end());
-      if (dims.size() < originalSize) {
-        LOG(WARNING) << "Parameter `dims` has repeated dimensions.";
-      }
-
-      CAFFE_ENFORCE(dims.front() >= 0, "Dimension ids must be non-negative.");
-      CAFFE_ENFORCE_GE(
-          in[0].dims_size() + dims.size(),
-          dims.back() + 1,
-          "Input needs at least ",
-          (1 + dims.back() - dims.size()),
-          " dimensions given `dims`.");
-
-      vector<TensorShape> out(1);
-
-      int cur_pos = 0;
-      int idx = 0;
-      for (const auto new_dim : dims) {
-        for (int i = cur_pos; i < new_dim; i++) {
-          out[0].add_dims(in[0].dims(idx++));
-        }
-        out[0].add_dims(1);
-        cur_pos = new_dim + 1;
-      }
-      for (; idx < in[0].dims_size(); idx++) {
-        out[0].add_dims(in[0].dims(idx));
-      }
-      out[0].set_data_type(in[0].data_type());
-      return out;
-    })
-    .SetDoc(R"DOC(
-Insert single-dimensional entries to the shape of a tensor.
-Takes one required argument `dims`, a list of dimensions that will be inserted.
-Dimension indices in `dims` are as seen in the output tensor. For example:
-
-  Given a tensor such that tensor.Shape() = [3, 4, 5], then
-  ExpandDims(tensor, dims=[0, 4]).Shape() == [1, 3, 4, 5, 1])
-
-If the same blob is provided in input and output, the operation is copy-free.
-)DOC")
-    .Input(0, "data", "Original tensor")
-    .Output(0, "expanded", "Reshaped tensor with same data as input.");
 
 SHOULD_NOT_DO_GRADIENT(WallClockTime);
 
@@ -854,24 +804,6 @@ SHOULD_NOT_DO_GRADIENT(IsEmpty);
 SHOULD_NOT_DO_GRADIENT(LengthsToShape);
 SHOULD_NOT_DO_GRADIENT(UnsafeCoalesce);
 
-class GetSqueezeGradient : public GradientMakerBase {
-  using GradientMakerBase::GradientMakerBase;
-  vector<OperatorDef> GetGradientDefs() override {
-    return SingleGradientDef(
-        "ExpandDims", "", vector<string>{GO(0)}, vector<string>{GI(0)});
-  }
-};
-REGISTER_GRADIENT(Squeeze, GetSqueezeGradient);
-
-class GetExpandDimsGradient : public GradientMakerBase {
-  using GradientMakerBase::GradientMakerBase;
-  vector<OperatorDef> GetGradientDefs() override {
-    return SingleGradientDef(
-        "Squeeze", "", vector<string>{GO(0)}, vector<string>{GI(0)});
-  }
-};
-REGISTER_GRADIENT(ExpandDims, GetExpandDimsGradient);
-
 class GetFlattenGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
   vector<OperatorDef> GetGradientDefs() override {
@@ -905,11 +837,33 @@ class GetSumGradient : public GradientMakerBase {
 };
 REGISTER_GRADIENT(Sum, GetSumGradient);
 
-// TODO(jiayq): Weighted sum is originally intended to be used in SGD, but in
-// theory, its gradient DOES exist. Should we enable the gradient?
-SHOULD_NOT_DO_GRADIENT(WeightedSum);
 SHOULD_NOT_DO_GRADIENT(ScatterWeightedSum);
 SHOULD_NOT_DO_GRADIENT(ScatterAssign);
+
+class GetWeightedSumGradient : public GradientMakerBase {
+  using GradientMakerBase::GradientMakerBase;
+  vector<OperatorDef> GetGradientDefs() override {
+    ArgumentHelper argsHelper(def_);
+    const bool grad_on_w = argsHelper.GetSingleArgument<bool>("grad_on_w", 0);
+
+    auto inputs = vector<string>{GO(0)};
+    auto outputs = vector<string>();
+    for (int i = 0; i < def_.input_size(); i += 2) {
+      inputs.push_back(I(i));
+      inputs.push_back(I(i + 1));
+      outputs.push_back(GI(i));
+    }
+
+    if (grad_on_w) {
+      for (int i = 0; i < def_.input_size(); i += 2) {
+        outputs.push_back(GI(i + 1));
+      }
+    }
+
+    return SingleGradientDef("WeightedSumGradient", "", inputs, outputs);
+  }
+};
+REGISTER_GRADIENT(WeightedSum, GetWeightedSumGradient);
 
 class GetMaxGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;

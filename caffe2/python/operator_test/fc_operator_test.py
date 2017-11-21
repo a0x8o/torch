@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -52,6 +67,12 @@ class TestFcOperator(hu.HypothesisTestCase):
             engine=engine,
         )
 
+        if dtype == np.float16 and gc.device_type == caffe2_pb2.CUDA:
+            a = caffe2_pb2.Argument()
+            a.i = 1
+            a.name = "float16_compute"
+            op.arg.extend([a])
+
         # Check against numpy reference
         self.assertReferenceChecks(
             device_option=gc,
@@ -72,6 +93,32 @@ class TestFcOperator(hu.HypothesisTestCase):
         self.assertGradientChecks(gc, op, [X, W, b], 2, [0],
                                   threshold=threshold, stepsize=stepsize)
 
+
+    @settings(max_examples=50)
+    @given(n=st.integers(1, 5),
+           m=st.integers(0, 5),
+           k=st.integers(1, 5))
+    def test_fc_transposed(self, n, m, k):
+        X = np.random.rand(m, k).astype(np.float32) - 0.5
+        W = np.random.rand(n, k).astype(np.float32).T - 0.5
+        b = np.random.rand(n).astype(np.float32) - 0.5
+
+        def fc_op(X, W, b):
+            return [np.dot(X, W) + b]
+
+        op = core.CreateOperator(
+            'FCTransposed',
+            ['X', 'W', 'b'],
+            'out',
+        )
+
+        # Check against numpy reference
+        self.assertReferenceChecks(
+            device_option=hu.cpu_do,
+            op=op,
+            inputs=[X, W, b],
+            reference=fc_op,
+        )
 
 if __name__ == "__main__":
     import unittest

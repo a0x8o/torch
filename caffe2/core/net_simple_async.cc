@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/net_simple_async.h"
 #include "caffe2/core/net.h"
 
@@ -20,6 +36,8 @@ AsyncSimpleNet::AsyncSimpleNet(
   VLOG(1) << "Constructing AsyncSimpleNet " << net_def->name();
   const bool net_def_has_device_option = net_def->has_device_option();
   // Initialize the operators
+  const DeviceOption* first_device_option = nullptr;
+  const DeviceOption* current_device_option;
   for (int idx = 0; idx < net_def->op_size(); ++idx) {
     const auto& operator_def = net_def->op(idx);
     VLOG(1) << "Creating operator " << operator_def.name() << ": "
@@ -32,20 +50,28 @@ AsyncSimpleNet::AsyncSimpleNet(
       OperatorDef temp_def(operator_def);
       temp_def.mutable_device_option()->CopyFrom(net_def->device_option());
       op = CreateOperator(temp_def, ws, idx);
+      current_device_option = &net_def->device_option();
     } else {
       op = CreateOperator(operator_def, ws, idx);
       op->set_debug_def(
           std::shared_ptr<const OperatorDef>{net_def, &(net_def->op(idx))});
+      current_device_option = &operator_def.device_option();
+    }
+    if (!first_device_option) {
+      first_device_option = current_device_option;
+    } else {
+      CAFFE_ENFORCE(
+          IsSameDevice(*first_device_option, *current_device_option),
+          "AsyncSimpleNet supports only single device networks");
     }
     operators_.emplace_back(std::move(op));
   }
   events_ = {&operators_.back()->event()};
 }
 
-bool AsyncSimpleNet::RunAsync() {
-  if (observer_) {
-    observer_->Start();
-  }
+bool AsyncSimpleNet::DoRunAsync() {
+  StartAllObservers();
+
   const auto& net_name = name_.c_str();
   VLOG(1) << "Running net " << name_;
   for (auto& op : operators_) {
@@ -62,9 +88,7 @@ bool AsyncSimpleNet::RunAsync() {
       return false;
     }
   }
-  if (observer_) {
-    observer_->Stop();
-  }
+  StopAllObservers();
   return true;
 }
 

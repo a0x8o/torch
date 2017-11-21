@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/memonger.h"
 
 #include <set>
@@ -277,13 +293,25 @@ class ComputeBlobRecyclingForDag {
       Argument* arg = op->mutable_arg(i);
       const string& name = arg->name();
       if (name == "step_net" || name == "backward_step_net") {
-        NetDef step_net;
-        CAFFE_ENFORCE(
-            google::protobuf::TextFormat::ParseFromString(arg->s(), &step_net),
-            "Could not parse step net:",
-            name);
-        step_net = apply_assignments(step_net);
-        arg->set_s(ProtoDebugString(step_net));
+        if (arg->has_n()) {
+          NetDef* step_net_ref = arg->mutable_n();
+          CAFFE_ENFORCE(
+              !arg->has_s(),
+              "Invalid definition for ",
+              name,
+              ". Only one of NetDef and string should be present");
+          NetDef optimized_net = apply_assignments(*step_net_ref);
+          step_net_ref->CopyFrom(optimized_net);
+        } else {
+          NetDef step_net;
+          CAFFE_ENFORCE(
+              google::protobuf::TextFormat::ParseFromString(
+                  arg->s(), &step_net),
+              "Could not parse step net:",
+              name);
+          step_net = apply_assignments(step_net);
+          arg->set_s(ProtoDebugString(step_net));
+        }
       }
     }
 

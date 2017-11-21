@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/net_simple.h"
 #include "caffe2/core/net.h"
 
@@ -41,10 +57,9 @@ SimpleNet::SimpleNet(
   }
 }
 
-bool SimpleNet::RunAsync() {
-  if (observer_) {
-    observer_->Start();
-  }
+bool SimpleNet::DoRunAsync() {
+  StartAllObservers();
+
   const auto& net_name = name_.c_str();
   VLOG(1) << "Running net " << name_;
   for (auto& op : operators_) {
@@ -61,9 +76,7 @@ bool SimpleNet::RunAsync() {
       return false;
     }
   }
-  if (observer_) {
-    observer_->Stop();
-  }
+  StopAllObservers();
   return true;
 }
 
@@ -109,6 +122,9 @@ vector<float> SimpleNet::TEST_Benchmark(
   CaffeMap<string, float> time_per_op_type;
   if (run_individual) {
     for (int i = 0; i < main_runs; ++i) {
+      for (auto& op : operators_) {
+        op->ResetEvent();
+      }
       int idx = 0;
       for (auto& op : operators_) {
         const string& op_type = op->debug_def().type();

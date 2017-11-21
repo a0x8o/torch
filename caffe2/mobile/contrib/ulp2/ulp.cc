@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "ulp.h"
 #include "caffe2/operators/conv_pool_op_base.h"
 #include "ulp_neon.h"
@@ -277,7 +293,13 @@ std::unique_ptr<QConvState> create2b1bConvState(Workspace* ws,
   //   r->WQL1Norm.mutable_data<float>()[i] *= center_distance;
   // }
   state->parallelFor = [ws](size_t range, std::function<void(size_t)> f) {
-    return ws->GetThreadPool()->run([&](int, size_t v) { f(v); }, range);
+#if CAFFE2_MOBILE
+    ws->GetThreadPool()->run([&](int, size_t v) { f(v); }, range);
+#else
+    for (size_t v = 0; v < range; ++v) {
+      f(v);
+    }
+#endif
   };
   if (b) {
     state->bias = caffe2::make_unique<TensorCPU>(*b);

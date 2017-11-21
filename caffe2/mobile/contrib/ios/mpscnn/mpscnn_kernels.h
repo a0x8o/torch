@@ -1,9 +1,23 @@
-// Copyright 2004-present Facebook. All Rights Reserved.
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 // @generated
 
 static const char* MPSCNN_KERNELS = R"V0G0N(
 
-//  Copyright 2004-present Facebook. All Rights Reserved.
 
 #include <metal_stdlib>
 
@@ -660,20 +674,51 @@ kernel void elementwise_mul(texture2d<half, access::read> in0[[texture(0), funct
                             texture2d_array<half, access::write> outa[[texture(2), function_constant(in0_is_arr)]],
                             constant float* in1[[buffer(1)]],
                             ushort3 gid[[thread_position_in_grid]]) {
+  ushort last_dim = ushort_arg_2;
+  ushort idx;
   if (in0_is_tex) {
     if (gid.x >= out.get_width() || gid.y >= out.get_height()) {
       return;
     }
+    idx = gid.y * out.get_width() + gid.x;
   } else {
     if (gid.x >= outa.get_width() || gid.y >= outa.get_height()) {
       return;
     }
+    idx = gid.y * outa.get_width() + gid.x;
   }
   ushort2 gid_ = ushort2(gid.x, gid.y);
   if (in0_is_tex) {
-    out.write(in0.read(gid_) * in1[0], gid_);
+    out.write(in0.read(gid_) * in1[idx % last_dim], gid_);
   } else {
-    outa.write(ina0.read(gid_, gid.z) * in1[0], gid_, gid.z);
+    outa.write(ina0.read(gid_, gid.z) * in1[idx % last_dim], gid_, gid.z);
+  }
+}
+
+kernel void elementwise_sub(texture2d<half, access::read> in0[[texture(0), function_constant(in0_is_tex)]],
+                            texture2d_array<half, access::read> ina0[[texture(0), function_constant(in0_is_arr)]],
+                            texture2d<half, access::write> out[[texture(2), function_constant(in0_is_tex)]],
+                            texture2d_array<half, access::write> outa[[texture(2), function_constant(in0_is_arr)]],
+                            constant float* in1[[buffer(1)]],
+                            ushort3 gid[[thread_position_in_grid]]) {
+  ushort last_dim = ushort_arg_2;
+  ushort idx;
+  if (in0_is_tex) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) {
+      return;
+    }
+    idx = gid.y * out.get_width() + gid.x;
+  } else {
+    if (gid.x >= outa.get_width() || gid.y >= outa.get_height()) {
+      return;
+    }
+    idx = gid.y * outa.get_width() + gid.x;
+  }
+  ushort2 gid_ = ushort2(gid.x, gid.y);
+  if (in0_is_tex) {
+    out.write(in0.read(gid_) - in1[idx % last_dim], gid_);
+  } else {
+    outa.write(ina0.read(gid_, gid.z) - in1[idx % last_dim], gid_, gid.z);
   }
 }
 

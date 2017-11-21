@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/recurrent_network_executor.h"
 
 #include "caffe2/core/timer.h"
@@ -17,6 +33,7 @@ std::unique_ptr<RecurrentNetworkExecutorBase> createRNNExecutor<CPUContext>(
     exec->setNumThreads(num_threads);
     LOG(INFO) << "Set num threads: " << num_threads;
   }
+  exec->debug_ = rnn_args.GetSingleArgument<int>("rnn_executor_debug", 0);
   return std::unique_ptr<RecurrentNetworkExecutorBase>(exec);
 }
 
@@ -166,27 +183,26 @@ void ThreadedRecurrentNetworkExecutor::_Exec() {
   // Start threads if not started
   std::unique_lock<std::mutex> lk(countdown_mtx_);
   while (workers_.size() < num_threads_) {
-    VLOG(1) << "Start RNN worker " << workers_.size() << " / "
-              << num_threads_;
+    VLOG(1) << "Start RNN worker " << workers_.size() << " / " << num_threads_;
     workers_.push_back(
         std::thread(&ThreadedRecurrentNetworkExecutor::WorkerFunction, this));
   }
 
   // Wait until threads finish.
   Timer t;
-  cv_.wait_for(lk, std::chrono::seconds(30), [&] {
-    // Log if we are still running, so that we catch deadlocks.. there
-    // should not be any deadlocks, but...
-    if (t.Seconds() > 10) {
-      LOG(INFO) << "RNN Executor still running, remaining ops: " << countdown_;
-    }
-    return failed_ || countdown_ == 0;
-  });
+  while (!failed_ && countdown_ > 0) {
+    cv_.wait_for(lk, std::chrono::seconds(30), [&] {
+      // Log if we are still running, so that we catch deadlocks.. there
+      // should not be any deadlocks, but...
+      if (t.Seconds() > 10) {
+        LOG(INFO) << "RNN Executor still running, remaining ops: "
+                  << countdown_;
+      }
+      return failed_ || countdown_ == 0;
+    });
+  }
 
-  CAFFE_ENFORCE_EQ(false, failed_, "Recurrent network execution failed");
-  CAFFE_ENFORCE_EQ(
-      0, countdown_, "Recurrent network execution did not finish in time");
-  CAFFE_ENFORCE_EQ(job_queue_.size(), 0);
+  CAFFE_ENFORCE_EQ(false, failed_);
 }
 
 } // namespace caffe2

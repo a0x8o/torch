@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -6,8 +21,10 @@ from __future__ import unicode_literals
 from hypothesis import given
 import hypothesis.strategies as st
 import numpy as np
-from caffe2.python import core, workspace
+from caffe2.python import brew, core, workspace
 import caffe2.python.hypothesis_test_util as hu
+from caffe2.python.model_helper import ModelHelper
+
 
 import unittest
 
@@ -246,6 +263,37 @@ class TestSpatialBN(hu.HypothesisTestCase):
         for input_to_check in [0, 1, 2]:  # dX, dScale, dBias
             self.assertGradientChecks(gc, op, [X, scale, bias, mean, var],
                                       input_to_check, [0], stepsize=0.01)
+
+    @given(size=st.integers(7, 10),
+           input_channels=st.integers(1, 10),
+           batch_size=st.integers(1, 3),
+           seed=st.integers(0, 65535),
+           epsilon=st.floats(1e-5, 1e-2),
+           engine=st.sampled_from(["", "CUDNN"]),
+           **hu.gcs)
+    def test_spatialbn_brew_wrapper(
+            self, size, input_channels, batch_size, seed, epsilon,
+            engine, gc, dc):
+        np.random.seed(seed)
+        X = np.random.rand(
+            batch_size, input_channels, size, size).astype(np.float32)
+
+        workspace.FeedBlob('X', X)
+
+        model = ModelHelper(name='test_spatialbn_brew_wrapper')
+
+        brew.spatial_bn(
+            model,
+            'X',
+            'Y',
+            input_channels,
+            epsilon=epsilon,
+            is_test=False,
+        )
+
+        workspace.RunNetOnce(model.param_init_net)
+        workspace.RunNetOnce(model.net)
+
 
 if __name__ == "__main__":
     unittest.main()

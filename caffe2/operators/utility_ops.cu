@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <math.h>
 #include <cfloat>
 // TODO(jamesreed): I would use <cmath> here but std::isnan
@@ -337,6 +353,47 @@ bool ScatterWeightedSumOp<float,CUDAContext>::DoRunWithType() {
 REGISTER_CUDA_OPERATOR(
     ScatterWeightedSum,
     ScatterWeightedSumOp<float, CUDAContext>);
+
+namespace {
+
+template <typename Index, typename T>
+__global__ void scatter_assign_kernel(
+    T* data,
+    const Index* idxs,
+    const T* slicesData,
+    TIndex N,
+    TIndex K,
+    TIndex block_size) {
+  for (TIndex i = blockIdx.x; i < K; i += gridDim.x) {
+    Index idx = idxs[i];
+    CUDA_KERNEL_ASSERT(0 <= idx && idx < N);
+    const T* src = slicesData + block_size * i;
+    T* dest = data + block_size * idx;
+    for (TIndex j = threadIdx.x; j < block_size; j += blockDim.x) {
+      dest[j] = src[j];
+    }
+  }
+}
+
+} // namespace
+
+template <>
+template <typename Index, typename T>
+void ScatterAssignOp<CUDAContext>::DoScatterAssign(
+    T* data,
+    const Index* idxs,
+    const T* slicesData,
+    TIndex N,
+    TIndex K,
+    TIndex block_size) {
+  scatter_assign_kernel<<<
+      std::min(K, static_cast<TIndex>(CAFFE_MAXIMUM_NUM_BLOCKS)),
+      CAFFE_CUDA_NUM_THREADS,
+      0,
+      context_.cuda_stream()>>>(data, idxs, slicesData, N, K, block_size);
+}
+
+REGISTER_CUDA_OPERATOR(ScatterAssign, ScatterAssignOp<CUDAContext>);
 
 #if THRUST_VERSION >= 100800
 __global__ void remap_kernel(

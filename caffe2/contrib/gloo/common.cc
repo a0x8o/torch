@@ -1,15 +1,23 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/contrib/gloo/common.h"
 
 #include "caffe2/core/logging.h"
 #include "caffe2/core/tensor.h"
-
-#if defined(GLOO_USE_MPI) && GLOO_USE_MPI
-#include <mutex>
-#endif
-
-#if defined(GLOO_USE_MPI) && GLOO_USE_MPI
-#include <mpi.h>
-#endif
 
 #include <gloo/transport/tcp/device.h>
 #if defined(GLOO_USE_IBVERBS) && GLOO_USE_IBVERBS
@@ -51,27 +59,6 @@ std::shared_ptr<::gloo::transport::Device> createDevice(
 
   CAFFE_THROW("Invalid transport: ", attr.transport);
 }
-
-#if defined(GLOO_USE_MPI) && GLOO_USE_MPI
-static std::mutex mpiMutex;
-static int mpiRefs = 0;
-
-void mpiInitialize() {
-  std::lock_guard<std::mutex> lock(mpiMutex);
-  if (mpiRefs++ == 0) {
-    auto rv = MPI_Init(nullptr, nullptr);
-    CAFFE_ENFORCE_EQ(rv, 0, "MPI_Init() failed");
-  }
-}
-
-void mpiFinalize() {
-  std::lock_guard<std::mutex> lock(mpiMutex);
-  if (--mpiRefs == 0) {
-    auto rv = MPI_Finalize();
-    CAFFE_ENFORCE_EQ(rv, 0, "MPI_Finalize() failed");
-  }
-}
-#endif
 
 } // namespace gloo
 } // namespace caffe2
