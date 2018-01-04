@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <chrono>
 #include <vector>
 #include "caffe2/core/operator.h"
@@ -160,6 +176,19 @@ struct TimerGetAndEndOp : public Operator<CPUContext> {
   }
 };
 
+struct TimerGetOp : public Operator<CPUContext> {
+  TimerGetOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator(operator_def, ws) {}
+
+  bool RunOnDevice() override {
+    int64_t nanos = OperatorBase::Input<TimerInstance*>(0)->get_ns();
+    auto* res = OperatorBase::Output<TensorCPU>(0);
+    res->Resize();
+    res->template mutable_data<int64_t>()[0] = nanos;
+    return true;
+  }
+};
+
 struct CpuUtilizationReportOp : public Operator<CPUContext> {
   CpuUtilizationReportOp(const OperatorDef& operator_def, Workspace* ws)
       : Operator(operator_def, ws),
@@ -189,6 +218,7 @@ REGISTER_CPU_OPERATOR(StatRegistryExport, StatRegistryExportOp);
 REGISTER_CPU_OPERATOR(TimerBegin, TimerBeginOp);
 REGISTER_CPU_OPERATOR(TimerEnd, TimerEndOp);
 REGISTER_CPU_OPERATOR(TimerGetAndEnd, TimerGetAndEndOp);
+REGISTER_CPU_OPERATOR(TimerGet, TimerGetOp);
 REGISTER_CPU_OPERATOR(CpuUtilizationReport, CpuUtilizationReportOp);
 
 OPERATOR_SCHEMA(StatRegistryCreate)
@@ -251,6 +281,13 @@ OPERATOR_SCHEMA(TimerGetAndEnd)
     .NumOutputs(1)
     .SetDoc(R"DOC(Queries the current time of a timer in nanos, stops the timer
             publishing a CAFFE_EVENT)DOC")
+    .Input(0, "timer", "Pointer to timer, obtained from TimerBegin.")
+    .Output(0, "nanos", "nanoseconds in int64");
+
+OPERATOR_SCHEMA(TimerGet)
+    .NumInputs(1)
+    .NumOutputs(1)
+    .SetDoc(R"DOC(Queries the current time of a timer in nanos)DOC")
     .Input(0, "timer", "Pointer to timer, obtained from TimerBegin.")
     .Output(0, "nanos", "nanoseconds in int64");
 

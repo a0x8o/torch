@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -234,6 +249,64 @@ class BrewTest(unittest.TestCase):
         brew.fc(model, a, 'b', 200, 5)
         # test the _parameters_info is shared between model and step_model
         self.assertEqual(model._parameters_info, step_model._parameters_info)
+
+    def test_cond(self):
+        workspace.FeedBlob("cond", np.array(True))
+        workspace.FeedBlob("then_value", np.array(1))
+        workspace.FeedBlob("else_value", np.array(2))
+
+        then_model = ModelHelper(name="then_test_model")
+        then_model.net.Copy("then_value", "output_blob")
+
+        else_model = ModelHelper(name="else_test_model")
+        else_model.net.Copy("else_value", "output_blob")
+
+        model = ModelHelper(name="test_model")
+        brew.cond(
+            model=model,
+            cond_blob="cond",
+            external_blobs=["then_value", "else_value", "output_blob"],
+            then_model=then_model,
+            else_model=else_model)
+
+        workspace.RunNetOnce(model.param_init_net)
+        workspace.RunNetOnce(model.net)
+        output_value = workspace.FetchBlob("output_blob")
+        self.assertEqual(output_value, 1)
+        workspace.FeedBlob("cond", np.array(False))
+        workspace.RunNetOnce(model.param_init_net)
+        workspace.RunNetOnce(model.net)
+        output_value = workspace.FetchBlob("output_blob")
+        self.assertEqual(output_value, 2)
+
+    def test_loop(self):
+        workspace.FeedBlob("cond", np.array(True))
+        workspace.FeedBlob("ONE", np.array(1))
+        workspace.FeedBlob("TWO", np.array(2))
+        workspace.FeedBlob("TEN", np.array(10))
+        workspace.FeedBlob("counter", np.array(0))
+        workspace.FeedBlob("output_blob", np.array(0))
+
+        loop_model = ModelHelper(name="loop_test_model")
+        loop_model.net.Add(["output_blob", "TWO"], "output_blob")
+
+        cond_model = ModelHelper(name="cond_test_model")
+        cond_model.net.Add(["counter", "ONE"], "counter")
+        comp_res = cond_model.net.LT(["counter", "TEN"])
+        cond_model.net.Copy(comp_res, "cond")
+
+        model = ModelHelper(name="test_model")
+        brew.loop(
+            model=model,
+            cond_blob="cond",
+            external_blobs=["cond", "ONE", "TWO", "TEN", "counter", "output_blob"],
+            loop_model=loop_model,
+            cond_model=cond_model)
+
+        workspace.RunNetOnce(model.param_init_net)
+        workspace.RunNetOnce(model.net)
+        output_value = workspace.FetchBlob("output_blob")
+        self.assertEqual(output_value, 18)
 
 
 @unittest.skipIf(not workspace.has_gpu_support, "No gpu support.")

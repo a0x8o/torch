@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -5,7 +20,7 @@ from caffe2.proto import caffe2_pb2
 import caffe2.python.optimizer as optimizer
 from caffe2.python.optimizer import (
     build_sgd, build_multi_precision_sgd, build_ftrl, build_adagrad,
-    build_adam, build_yellowfin, add_weight_decay, SgdOptimizer)
+    build_adam, build_yellowfin, build_rms_prop, add_weight_decay, SgdOptimizer)
 from caffe2.python.optimizer_context import UseOptimizer
 from caffe2.python.optimizer_test_util import (
     OptimizerTestBase, LRModificationTestBase
@@ -16,6 +31,19 @@ import numpy as np
 from numpy.testing import assert_allclose, assert_equal
 import math
 import unittest
+
+
+class TestMomentumSgd(OptimizerTestBase, TestCase):
+    def build_optimizer(self, model, **kwargs):
+        self._skip_gpu = False
+        return build_sgd(model, base_learning_rate=0.1, momentum=0.1, **kwargs)
+
+    def check_optimizer(self, optimizer):
+        self.assertTrue(optimizer.get_auxiliary_parameters().shared)
+        self.assertTrue(optimizer.get_auxiliary_parameters().local)
+        for param in optimizer.get_auxiliary_parameters().shared:
+            tensor = workspace.FetchBlob(param)
+            np.testing.assert_allclose(np.array([1.0]), tensor, atol=1e-5)
 
 
 class TestSgd(OptimizerTestBase, LRModificationTestBase, TestCase):
@@ -374,6 +402,23 @@ class TestYellowFin(OptimizerTestBase, TestCase):
                         n_iter,
                         gpu=True
                     )
+
+
+class TestRmsProp(OptimizerTestBase, LRModificationTestBase, TestCase):
+    def build_optimizer(self, model, **kwargs):
+        self._skip_gpu = False
+        return build_rms_prop(
+            model, base_learning_rate=0.1, epsilon=0.1, **kwargs
+        )
+
+    def check_optimizer(self, optimizer):
+        self.assertFalse(optimizer.get_auxiliary_parameters().shared)
+        self.assertTrue(optimizer.get_auxiliary_parameters().local)
+        for param in optimizer.get_auxiliary_parameters().local:
+            workspace.FetchBlob(param)
+
+    def testSparse(self):
+        raise unittest.SkipTest("no sparse support")
 
 
 class TestMultiOptimizers(TestCase):

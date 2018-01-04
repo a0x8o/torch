@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package batch_mse_loss
 # Module caffe2.python.layers.batch_mse_loss
 from __future__ import absolute_import
@@ -5,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from caffe2.python import schema
+from caffe2.python import core, schema
 from caffe2.python.layers.layers import (
     ModelLayer,
 )
@@ -61,5 +76,22 @@ class BatchMSELoss(ModelLayer):
             [label, prediction],
             net.NextScopedBlob('l2')
         )
+
+        if 'weight' in self.input_record.fields:
+            weight_blob = self.input_record.weight()
+            if self.input_record.weight.field_type().base != np.float32:
+                weight_blob = net.Cast(
+                    weight_blob,
+                    weight_blob + '_float32',
+                    to=core.DataType.FLOAT
+                )
+            weight_blob = net.StopGradient(
+                [weight_blob],
+                [net.NextScopedBlob('weight_stop_gradient')],
+            )
+            l2dist = net.Mul(
+                [l2dist, weight_blob],
+                net.NextScopedBlob('weighted_l2_distance'),
+            )
 
         net.AveragedLoss(l2dist, self.output_schema.field_blobs())

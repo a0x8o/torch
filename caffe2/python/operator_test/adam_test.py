@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -83,14 +98,20 @@ class TestAdam(hu.HypothesisTestCase):
 
         # Create an indexing array containing values which index into grad
         indices = data_strategy.draw(
-            hu.tensor(dtype=np.int64,
-                      elements=st.sampled_from(np.arange(grad.shape[0]))),
+            hu.tensor(
+                max_dim=1,
+                min_value=1,
+                max_value=grad.shape[0],
+                dtype=np.int64,
+                elements=st.sampled_from(np.arange(grad.shape[0])),
+            ),
         )
-        hypothesis.note('indices.shape: %s' % str(indices.shape))
 
-        # For now, the indices must be unique
-        hypothesis.assume(np.array_equal(np.unique(indices.flatten()),
-                                         np.sort(indices.flatten())))
+        # Verify that the generated indices are unique
+        hypothesis.assume(
+            np.array_equal(
+                np.unique(indices.flatten()),
+                np.sort(indices.flatten())))
 
         # Sparsify grad
         grad = grad[indices]
@@ -120,3 +141,8 @@ class TestAdam(hu.HypothesisTestCase):
             [param, mom1, mom2, indices, grad, LR, ITER],
             ref_sparse,
             input_device_options=input_device_options)
+
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()

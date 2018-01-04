@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/lpnorm_op.h"
 
 namespace caffe2 {
@@ -28,7 +44,7 @@ bool LpNormGradientOp<float, CPUContext>::RunOnDevice() {
   CAFFE_ENFORCE_EQ(dnorm.ndim(), 1);
   CAFFE_ENFORCE_EQ(dnorm.dim32(0), 1);
   dX->ResizeLike(X);
-  const float kEps = 1e-12;
+  const float kEps = 1e-12f;
 
   if (p_ == 1) {
     // Todo: implement in eigen
@@ -44,7 +60,7 @@ bool LpNormGradientOp<float, CPUContext>::RunOnDevice() {
     }
   } else if (p_ == 2) {
     EigenVectorMap<float>(dX->mutable_data<float>(), X.size()).array() =
-        ConstEigenVectorMap<float>(X.data<float>(), X.size()).array() * 2.0 *
+        ConstEigenVectorMap<float>(X.data<float>(), X.size()).array() * 2.0f *
         (dnorm.data<float>())[0];
   }
 

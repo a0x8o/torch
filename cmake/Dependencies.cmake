@@ -36,7 +36,6 @@ else()
 endif()
 
 
-
 # ---[ BLAS
 set(BLAS "Eigen" CACHE STRING "Selected BLAS library")
 set_property(CACHE BLAS PROPERTY STRINGS "Eigen;ATLAS;OpenBLAS;MKL;vecLib")
@@ -54,7 +53,6 @@ elseif(BLAS STREQUAL "OpenBLAS")
   find_package(OpenBLAS REQUIRED)
   caffe2_include_directories(${OpenBLAS_INCLUDE_DIR})
   list(APPEND Caffe2_DEPENDENCY_LIBS ${OpenBLAS_LIB})
-  list(APPEND Caffe2_DEPENDENCY_LIBS cblas)
 elseif(BLAS STREQUAL "MKL")
   find_package(MKL REQUIRED)
   caffe2_include_directories(${MKL_INCLUDE_DIR})
@@ -74,51 +72,71 @@ if(USE_NNPACK)
   if(NNPACK_FOUND)
     caffe2_include_directories(${NNPACK_INCLUDE_DIRS})
     list(APPEND Caffe2_DEPENDENCY_LIBS ${NNPACK_LIBRARIES})
+    if(TARGET nnpack)
+      # ---[ NNPACK is being built together with Caffe2: explicitly specify dependency
+      list(APPEND Caffe2_EXTERNAL_DEPENDENCIES nnpack)
+    endif()
   else()
     message(WARNING "Not compiling with NNPACK. Suppress this warning with -DUSE_NNPACK=OFF")
     set(USE_NNPACK OFF)
   endif()
 endif()
 
-# ---[ Google-glog
-if(USE_GLOG)
-  include("cmake/External/glog.cmake")
-  if(GLOG_FOUND)
-    set(CAFFE2_USE_GOOGLE_GLOG 1)
-    caffe2_include_directories(${GLOG_INCLUDE_DIRS})
-    list(APPEND Caffe2_DEPENDENCY_LIBS ${GLOG_LIBRARIES})
-  else()
-    message(WARNING "Not compiling with glog. Suppress this warning with -DUSE_GLOG=OFF")
-    set(USE_GLOG OFF)
-  endif()
-endif()
-
-# ---[ Google-gflags
+# ---[ gflags
 if(USE_GFLAGS)
-  include("cmake/External/gflags.cmake")
+  find_package(GFlags)
   if(GFLAGS_FOUND)
     set(CAFFE2_USE_GFLAGS 1)
     caffe2_include_directories(${GFLAGS_INCLUDE_DIRS})
     list(APPEND Caffe2_DEPENDENCY_LIBS ${GFLAGS_LIBRARIES})
   else()
-    message(WARNING "Not compiling with gflags. Suppress this warning with -DUSE_GFLAGS=OFF")
+    message(WARNING
+        "gflags is not found. Caffe2 will build without gflags support but it "
+        "is strongly recommended that you install gflags. Suppress this "
+        "warning with -DUSE_GFLAGS=OFF")
     set(USE_GFLAGS OFF)
+  endif()
+endif()
+
+# ---[ Google-glog
+if(USE_GLOG)
+  find_package(Glog)
+  if(GLOG_FOUND)
+    set(CAFFE2_USE_GOOGLE_GLOG 1)
+    caffe2_include_directories(${GLOG_INCLUDE_DIRS})
+    list(APPEND Caffe2_DEPENDENCY_LIBS ${GLOG_LIBRARIES})
+  else()
+    message(WARNING
+        "glog is not found. Caffe2 will build without glog support but it is "
+        "strongly recommended that you install glog. Suppress this warning "
+        "with -DUSE_GLOG=OFF")
+    set(USE_GLOG OFF)
   endif()
 endif()
 
 # ---[ Googletest and benchmark
 if(BUILD_TEST)
+  set(TEMP_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+  # We will build gtest as static libs and embed it directly into the binary.
+  set(BUILD_SHARED_LIBS OFF)
+  # For gtest, we will simply embed it into our test binaries, so we won't
+  # need to install it.
+  set(BUILD_GTEST ON)
+  set(INSTALL_GTEST OFF)
+  # We currently don't need gmock right now.
+  set(BUILD_GMOCK OFF)
   add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/googletest)
   caffe2_include_directories(${PROJECT_SOURCE_DIR}/third_party/googletest/googletest/include)
 
-  find_package(Benchmark)
-  if(Benchmark_FOUND)
-    list(APPEND Caffe2_DEPENDENCY_LIBS ${Benchmark_LIBRARIES})
-    caffe2_include_directories(${Benchmark_INCLUDE_DIRS})
-  else()
-    add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/benchmark)
-    caffe2_include_directories(${PROJECT_SOURCE_DIR}/third_party/benchmark/include)
-  endif()
+  # We will not need to test benchmark lib itself.
+  set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Disable benchmark testing as we don't need it.")
+  # We will not need to install benchmark since we link it statically.
+  set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "Disable benchmark install to avoid overwriting vendor install.")
+  add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/benchmark)
+  caffe2_include_directories(${PROJECT_SOURCE_DIR}/third_party/benchmark/include)
+
+  # Recover the build shared libs option.
+  set(BUILD_SHARED_LIBS ${TEMP_BUILD_SHARED_LIBS})
 endif()
 
 # ---[ LMDB
@@ -218,11 +236,14 @@ if(USE_FFMPEG)
 endif()
 
 # ---[ EIGEN
+# Due to license considerations, we will only use the MPL2 parts of Eigen.
 set(EIGEN_MPL2_ONLY 1)
-find_package(Eigen3 QUIET)
+find_package(Eigen3)
 if(EIGEN3_FOUND)
-  caffe2_include_directories(${EIGEN3_INCLUDE_DIRS})
+  message(STATUS "Found system Eigen at " ${EIGEN3_INCLUDE_DIR})
+  caffe2_include_directories(${EIGEN3_INCLUDE_DIR})
 else()
+  message(STATUS "Did not find system Eigen. Using third party subdirectory.")
   caffe2_include_directories(${PROJECT_SOURCE_DIR}/third_party/eigen)
 endif()
 
@@ -232,9 +253,10 @@ if(BUILD_PYTHON)
   find_package(PythonInterp 2.7)
   find_package(PythonLibs 2.7)
   find_package(NumPy REQUIRED)
+  # Observers are required in the python build
+  set(USE_OBSERVERS ON)
   if(PYTHONINTERP_FOUND AND PYTHONLIBS_FOUND AND NUMPY_FOUND)
     caffe2_include_directories(${PYTHON_INCLUDE_DIRS} ${NUMPY_INCLUDE_DIR})
-    list(APPEND Caffe2_PYTHON_DEPENDENCY_LIBS ${PYTHON_LIBRARIES})
   else()
     message(WARNING "Python dependencies not met. Not compiling with python. Suppress this warning with -DBUILD_PYTHON=OFF")
     set(BUILD_PYTHON OFF)
@@ -303,15 +325,28 @@ endif()
 # ---[ CUDA
 if(USE_CUDA)
   include(cmake/Cuda.cmake)
-  # CUDA 8.0 requires GCC 5
   if(HAVE_CUDA)
-    if (CMAKE_C_COMPILER_ID STREQUAL "GNU" AND
-        NOT CMAKE_C_COMPILER_VERSION VERSION_LESS 6.0 AND
-        CUDA_HOST_COMPILER STREQUAL CMAKE_C_COMPILER)
-      message(FATAL_ERROR
-        "CUDA 8.0 is not compatible with GCC version >= 6. "
-        "Use the following option to use another version (for example): \n"
-        "  -DCUDA_HOST_COMPILER=/usr/bin/gcc-5\n")
+    # CUDA 9.x requires GCC version <= 6
+    if ((CUDA_VERSION VERSION_EQUAL   9.0) OR
+        (CUDA_VERSION VERSION_GREATER 9.0  AND CUDA_VERSION VERSION_LESS 10.0))
+      if (CMAKE_C_COMPILER_ID STREQUAL "GNU" AND
+          NOT CMAKE_C_COMPILER_VERSION VERSION_LESS 7.0 AND
+          CUDA_HOST_COMPILER STREQUAL CMAKE_C_COMPILER)
+        message(FATAL_ERROR
+          "CUDA ${CUDA_VERSION} is not compatible with GCC version >= 7. "
+          "Use the following option to use another version (for example): \n"
+          "  -DCUDA_HOST_COMPILER=/usr/bin/gcc-6\n")
+      endif()
+    # CUDA 8.0 requires GCC version <= 5
+    elseif (CUDA_VERSION VERSION_EQUAL 8.0)
+      if (CMAKE_C_COMPILER_ID STREQUAL "GNU" AND
+          NOT CMAKE_C_COMPILER_VERSION VERSION_LESS 6.0 AND
+          CUDA_HOST_COMPILER STREQUAL CMAKE_C_COMPILER)
+        message(FATAL_ERROR
+          "CUDA 8.0 is not compatible with GCC version >= 6. "
+          "Use the following option to use another version (for example): \n"
+          "  -DCUDA_HOST_COMPILER=/usr/bin/gcc-5\n")
+      endif()
     endif()
   endif()
   # ---[ CUDNN
@@ -399,6 +434,16 @@ if(USE_GLOO)
   endif()
 endif()
 
+# ---[ profiling
+if(USE_PROF)
+  find_package(htrace)
+  if(htrace_FOUND)
+    set(USE_PROF_HTRACE ON)
+  else()
+    message(WARNING "htrace not found. Caffe2 will build without htrace prof")
+  endif()
+endif()
+
 if (USE_MOBILE_OPENGL)
   if (ANDROID)
     list(APPEND Caffe2_DEPENDENCY_LIBS EGL GLESv2)
@@ -436,4 +481,10 @@ if (USE_ATEN)
   caffe2_include_directories(${PROJECT_BINARY_DIR}/caffe2/contrib/aten/aten/src/ATen)
   caffe2_include_directories(${PROJECT_SOURCE_DIR}/third_party/aten/src)
   caffe2_include_directories(${PROJECT_BINARY_DIR}/caffe2/contrib/aten)
+endif()
+
+if (USE_ZSTD)
+  list(APPEND Caffe2_DEPENDENCY_LIBS libzstd_static)
+  caffe2_include_directories(${PROJECT_SOURCE_DIR}/third_party/zstd/lib)
+  add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/zstd/build/cmake)
 endif()

@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_CORE_WORKSPACE_H_
 #define CAFFE2_CORE_WORKSPACE_H_
 
@@ -12,6 +28,7 @@
 #include <cstddef>
 #include <mutex>
 #include <typeinfo>
+#include <unordered_set>
 #include <vector>
 
 #include "caffe2/core/blob.h"
@@ -112,11 +129,46 @@ class Workspace {
   }
 
   /**
-   * Add blob mappings from another workspace
+   * Adds blob mappings from workspace to the blobs from parent workspace.
+   * Creates blobs under possibly new names that redirect read/write operations
+   * to the blobs in the parent workspace.
+   * Arguments:
+   *  parent - pointer to parent workspace
+   *  forwarded_blobs - map from new blob name to blob name in parent's
+   * workspace skip_defined_blob - if set skips blobs with names that already
+   * exist in the workspace, otherwise throws exception
    */
   void AddBlobMapping(
       const Workspace* parent,
-      const std::unordered_map<string, string>& forwarded_blobs);
+      const std::unordered_map<string, string>& forwarded_blobs,
+      bool skip_defined_blobs = false);
+
+  /**
+   * Converts prevously mapped tensor blobs to local blobs, copies values from
+   * parent workspace blobs into new local blobs. Ignores undefined blobs.
+   */
+  template <class Context>
+  void CopyForwardedTensors(const std::unordered_set<std::string>& blobs) {
+    for (const auto& blob : blobs) {
+      if (!forwarded_blobs_.count(blob)) {
+        continue;
+      }
+      const auto& ws_blob = forwarded_blobs_[blob];
+      const auto* parent_ws = ws_blob.first;
+      auto* from_blob = parent_ws->GetBlob(ws_blob.second);
+      CAFFE_ENFORCE(from_blob);
+      CAFFE_ENFORCE(
+          from_blob->template IsType<Tensor<Context>>(),
+          "Expected blob with tensor value",
+          ws_blob.second);
+      forwarded_blobs_.erase(blob);
+      auto* to_blob = CreateBlob(blob);
+      CAFFE_ENFORCE(to_blob);
+      const auto& from_tensor = from_blob->template Get<Tensor<Context>>();
+      auto* to_tensor = to_blob->template GetMutable<Tensor<Context>>();
+      to_tensor->CopyFrom(from_tensor);
+    }
+  }
 
   /**
    * Return list of blobs owned by this Workspace, not including blobs
@@ -162,6 +214,14 @@ class Workspace {
    */
   Blob* CreateBlob(const string& name);
   /**
+   * Similar to CreateBlob(), but it creates a blob in the local workspace even
+   * if another blob with the same name already exists in the parent workspace
+   * -- in such case the new blob hides the blob in parent workspace. If a blob
+   * of the given name already exists in the local workspace, the creation is
+   * skipped and the existing blob is returned.
+   */
+  Blob* CreateLocalBlob(const string& name);
+  /**
    * Remove the blob of the given name. Return true if removed and false if
    * not exist.
    * Will NOT remove from the shared workspace.
@@ -177,6 +237,13 @@ class Workspace {
    * not exist, a nullptr is returned.
    */
   Blob* GetBlob(const string& name);
+
+  /**
+   * Renames a local workspace blob. If blob is not found in the local blob list
+   * or if the target name is already present in local or any parent blob list
+   * the function will through.
+   */
+  Blob* RenameBlob(const string& old_name, const string& new_name);
 
   /**
    * Creates a network with the given NetDef, and returns the pointer to the

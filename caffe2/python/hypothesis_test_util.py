@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package hypothesis_test_util
 # Module caffe2.python.hypothesis_test_util
 """
@@ -60,6 +75,10 @@ def is_sandcastle():
     return False
 
 
+def is_travis():
+    return 'TRAVIS' in os.environ
+
+
 hypothesis.settings.register_profile(
     "sandcastle",
     hypothesis.settings(
@@ -114,12 +133,21 @@ def elements_of_type(dtype=np.float32, filter_=None):
 def arrays(dims, dtype=np.float32, elements=None):
     if elements is None:
         elements = elements_of_type(dtype)
-    return hypothesis.extra.numpy.arrays(dtype, dims, elements=elements)
+    return hypothesis.extra.numpy.arrays(
+        dtype,
+        dims,
+        elements=elements,
+    )
 
 
-def tensor(min_dim=1, max_dim=4, dtype=np.float32, elements=None, **kwargs):
+def tensor(min_dim=1,
+           max_dim=4,
+           dtype=np.float32,
+           elements=None,
+           **kwargs):
     dims_ = st.lists(dims(**kwargs), min_size=min_dim, max_size=max_dim)
-    return dims_.flatmap(lambda dims: arrays(dims, dtype, elements))
+    return dims_.flatmap(
+        lambda dims: arrays(dims, dtype, elements))
 
 
 def tensor1d(min_len=1, max_len=64, dtype=np.float32, elements=None):
@@ -224,8 +252,10 @@ def sparse_lengths_tensor(**kwargs):
 def tensors(n, min_dim=1, max_dim=4, dtype=np.float32, elements=None, **kwargs):
     dims_ = st.lists(dims(**kwargs), min_size=min_dim, max_size=max_dim)
     return dims_.flatmap(
-        lambda dims: st.lists(arrays(dims, dtype, elements),
-                              min_size=n, max_size=n))
+        lambda dims: st.lists(
+            arrays(dims, dtype, elements),
+            min_size=n,
+            max_size=n))
 
 
 def tensors1d(n, min_len=1, max_len=64, dtype=np.float32, elements=None):

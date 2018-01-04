@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -7,7 +22,7 @@ import copy
 import time
 from functools import partial, reduce
 from future.utils import viewitems, viewkeys
-from hypothesis import assume, given, settings
+from hypothesis import assume, given, settings, HealthCheck
 import hypothesis.strategies as st
 import unittest
 
@@ -436,7 +451,7 @@ class TestOperators(hu.HypothesisTestCase):
         self.assertReferenceChecks(gc, op, inputs, depth_concat_with_order)
 
     @given(X=hu.arrays(dims=[5, 2],
-                       elements=st.floats(min_value=0.0, max_value=10.0)),
+                       elements=st.floats(min_value=1.0, max_value=10.0)),
            **hu.gcs_cpu_only)
     def test_last_n_windows(self, X, gc, dc):
         workspace.FeedBlob('input', X)
@@ -1716,7 +1731,7 @@ class TestOperators(hu.HypothesisTestCase):
            eps=st.floats(min_value=1e-4, max_value=1e-2),
            a_grad=hu.tensor(elements=st.floats(min_value=0.01, max_value=0.99)),
            eps_grad=st.floats(min_value=1e-4, max_value=1e-3),
-           **hu.gcs_cpu_only)
+           **hu.gcs)
     def test_logit(self, a, eps, a_grad, eps_grad, gc, dc):
         def ref(data):
             data = np.clip(data, eps, 1.0 - eps)
@@ -1739,7 +1754,7 @@ class TestOperators(hu.HypothesisTestCase):
 
     @given(a=hu.tensor(elements=st.floats(allow_nan=True)),
            value=st.floats(min_value=-10, max_value=10),
-           **hu.gcs_cpu_only)
+           **hu.gcs)
     def test_replace_nan(self, a, value, gc, dc):
         def ref(data):
             out = np.copy(data)
@@ -1865,8 +1880,8 @@ class TestOperators(hu.HypothesisTestCase):
             backward_link_external=backward_link_external,
             backward_link_offset=backward_link_offset,
             param=[inputs.index(p) for p in step_net.params],
-            step_net=str(step_net.Proto()),
-            backward_step_net=str(backward_step_net.Proto()),
+            step_net=step_net.Proto(),
+            backward_step_net=backward_step_net.Proto(),
             outputs_with_grads=[0],
         )
         workspace.FeedBlob(
@@ -1913,6 +1928,7 @@ class TestOperators(hu.HypothesisTestCase):
                 param,
                 [0])
 
+    @settings(suppress_health_check=[HealthCheck.filter_too_much])
     @given(n=st.integers(1, 5),
            c=st.integers(1, 5),
            h=st.integers(1, 5),
@@ -1929,6 +1945,7 @@ class TestOperators(hu.HypothesisTestCase):
         self.assertDeviceChecks(dc, op, [X], [0])
         self.assertGradientChecks(gc, op, [X], 0, [0])
 
+    @settings(suppress_health_check=[HealthCheck.filter_too_much])
     @given(n=st.integers(1, 5),
            c=st.integers(1, 5),
            h=st.integers(1, 5),

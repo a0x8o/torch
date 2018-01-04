@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package memonger
 # Module caffe2.python.memonger
 from __future__ import absolute_import
@@ -802,16 +817,12 @@ def apply_assignments(net, blob_assignments):
 
 def apply_recurrent_blob_assignments(op, blob_assignments, canonical_name):
     log.debug("Applying assignments to recurrent op: {}".format(op.type))
-    import google.protobuf.text_format as protobuftx
     step_args = [a for a in op.arg if a.name.endswith("step_net")]
     for step_arg in step_args:
-        step_proto = caffe2_pb2.NetDef()
-        protobuftx.Merge(step_arg.s.decode("ascii"), step_proto)
-        apply_assignments(step_proto, blob_assignments)
-        for i, einp in enumerate(step_proto.external_input):
+        apply_assignments(step_arg.n, blob_assignments)
+        for i, einp in enumerate(step_arg.n.external_input):
             if einp in blob_assignments:
-                step_proto.external_input[i] = canonical_name(einp)
-        step_arg.s = str(step_proto).encode("ascii")
+                step_arg.n.external_input[i] = canonical_name(einp)
     # Store renamings
     for blob, renamed in viewitems(blob_assignments):
         if blob in list(op.input) + list(op.output):

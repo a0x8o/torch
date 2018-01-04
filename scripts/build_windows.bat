@@ -17,10 +17,6 @@ if NOT DEFINED USE_CUDA (
   set USE_CUDA=OFF
 )
 
-if NOT DEFINED CMAKE_BUILD_TYPE (
-  set CMAKE_BUILD_TYPE=Release
-)
-
 if NOT DEFINED CMAKE_GENERATOR (
   if DEFINED APPVEYOR_BUILD_WORKER_IMAGE (
     if "%APPVEYOR_BUILD_WORKER_IMAGE%" == "Visual Studio 2017" (
@@ -65,7 +61,7 @@ cmake .. ^
   -DUSE_OPENCV=OFF ^
   -DBUILD_SHARED_LIBS=OFF ^
   -DBUILD_PYTHON=OFF^
-  -DPROTOBUF_PROTOC_EXECUTABLE=%CAFFE2_ROOT%\build_host_protoc\bin\protoc.exe ^
+  -DCAFFE2_CUSTOM_PROTOC_EXECUTABLE=%CAFFE2_ROOT%\build_host_protoc\bin\protoc.exe ^
   || goto :label_error
 
 :: Actually run the build

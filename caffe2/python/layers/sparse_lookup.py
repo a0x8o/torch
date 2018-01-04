@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package sparse_lookup
 # Module caffe2.python.layers.sparse_lookup
 from __future__ import absolute_import
@@ -9,6 +24,7 @@ from caffe2.python.helpers.arg_scope import get_current_scope
 from caffe2.python import schema
 from caffe2.python.layers.layers import (
     get_categorical_limit,
+    get_key,
     IdList,
     IdScoreList,
     LayerPsParam,
@@ -28,11 +44,12 @@ def get_sparse_lookup_predictor_version(version):
 
 
 class SparseLookup(ModelLayer):
-    _id_list_supported_reducers = ['PositionWeighted', 'LogMeanExp', 'LogSumExp',
-                                   'Max', 'Mean', 'Sum', 'Sqrt', 'None']
+    _id_list_supported_reducers = [
+        'PositionWeighted', 'LogMeanExp', 'LogSumExp', 'Max', 'Mean', 'Sum',
+        'WeightedSum', 'WeightedMean', 'Sqrt', 'None']
 
-    _id_score_list_supported_reducers = ['PositionWeighted', 'Mean', 'Sum',
-                                         'WeightedSum', 'WeightedMean', 'None']
+    _id_score_list_supported_reducers = [
+        'PositionWeighted', 'Mean', 'Sum', 'WeightedSum', 'WeightedMean', 'None']
 
     def __init__(self, model, input_record, inner_shape, reducer,
                  weight_init=None, weight_optim=None,
@@ -52,7 +69,9 @@ class SparseLookup(ModelLayer):
         self.reducer = reducer
 
         input_dim = get_categorical_limit(input_record)
-        assert input_dim is not None, "Unbounded features are not supported"
+        assert input_dim > 0, (
+            "{} should have categorical limit > 0, but got {}".format(
+                get_key(input_record)(), input_dim))
 
         scale = math.sqrt(1.0 / input_dim)
         self.shape = [input_dim] + inner_shape
@@ -168,10 +187,18 @@ class SparseLookup(ModelLayer):
         assert self.reducer in self._id_list_supported_reducers, (
             "Unsupported reducer: {} for ID_LIST".format(self.reducer)
         )
-        if self.reducer in ['Sum', 'Mean']:
+        if self.reducer in ['Sum', 'Mean', 'WeightedSum', 'WeightedMean']:
             op_input = [self.w,
                         self.input_record.items(),
                         self.input_record.lengths()]
+
+            # For id list features, the behaviors of 'Sum' and
+            # 'WeightedSum' are identical, since we can regard the weight on each
+            # id as 1. Similarly, for 'Mean' and 'WeightedMean'.
+            if self.reducer == 'WeightedSum':
+                self.reducer = 'Sum'
+            elif self.reducer == 'WeightedMean':
+                self.reducer = 'Mean'
 
             layer_name = 'SparseLengths' + self.reducer
             if version in ['fp32', 'fp16']:
@@ -193,7 +220,7 @@ class SparseLookup(ModelLayer):
         elif self.reducer == 'Sqrt':
             sqrt_weight = net.LengthsToWeights(
                 [self.input_record.lengths()],
-                [self.input_record.lengths() + '_sqrt'],
+                [net.NextScopedBlob('lengths_sqrt')],
                 power=0.5,
             )
             self._sparse_lengths_weighted_reducer(

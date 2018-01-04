@@ -1,8 +1,25 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/blob.h"
 #include "caffe2/core/context.h"
 #include "caffe2/core/tensor.h"
 #include "caffe2/mkl/mkl_utils.h"
 #include "caffe2/proto/caffe2.pb.h"
+#include "caffe2/utils/math.h"
 
 #include <gtest/gtest.h>
 
@@ -81,6 +98,49 @@ TEST(MKLDNNTest, SimpleConvolutionTest) {
   const float* out_data = Y.data<float>();
   for (int i = 0; i < Y.size(); ++i) {
     EXPECT_NEAR(out_data[i], 72.1, 1e-5);
+  }
+}
+
+TEST(MKLDNNTest, MKLMemoryCopyTest) {
+  // Test copy with valid and empty shapes.
+  // MKL calls fail at different points for dims {0} and dims {0,N} despite
+  // the buffer size being empty for both - former in dnnAllocateBuffer and
+  // the latter in dnnConversionExecute (likely due to some difference in
+  // layout?). Test both cases.
+  vector<vector<TIndex>> dims_list{{10, 3, 20, 20}, {0}, {0, 10}};
+  for (const auto& dims : dims_list) {
+    auto X_cpu_in = caffe2::make_unique<TensorCPU>(dims);
+    CPUContext ctx;
+    math::RandUniform<float, CPUContext>(
+        X_cpu_in->size(),
+        -1.0,
+        1.0,
+        X_cpu_in->template mutable_data<float>(),
+        &ctx);
+
+    // CPU -> MKL1
+    auto X_mkl1 = caffe2::make_unique<MKLMemory<float>>(dims);
+    X_mkl1->CopyFrom(*X_cpu_in);
+
+    // MK1 -> MKL2
+    auto X_mkl2 = caffe2::make_unique<MKLMemory<float>>(dims);
+    X_mkl2->CopyFrom(*X_mkl1);
+
+    // MKL1 <- MKL2
+    X_mkl1 = caffe2::make_unique<MKLMemory<float>>();
+    X_mkl2->CopyTo(X_mkl1.get());
+    EXPECT_EQ(X_mkl1->dims(), dims);
+    EXPECT_EQ(X_mkl1->size(), X_cpu_in->size());
+
+    // CPU <- MKL1
+    auto X_cpu_out = caffe2::make_unique<TensorCPU>();
+    X_mkl1->CopyTo(X_cpu_out.get());
+    EXPECT_EQ(X_cpu_out->dims(), dims);
+    EXPECT_EQ(X_cpu_out->size(), X_cpu_in->size());
+    for (int i = 0; i < X_cpu_in->size(); ++i) {
+      EXPECT_NEAR(
+          X_cpu_in->data<float>()[i], X_cpu_out->data<float>()[i], 1e-5);
+    }
   }
 }
 

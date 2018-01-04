@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package translate
 # Module caffe2.python.models.seq2seq.translate
 from __future__ import absolute_import
@@ -7,7 +22,6 @@ from __future__ import unicode_literals
 
 import argparse
 from future.utils import viewitems
-from itertools import izip
 import logging
 import numpy as np
 import sys
@@ -319,7 +333,7 @@ class Seq2SeqModelCaffe2EnsembleDecoder(object):
         state_configs = []
         output_log_probs = []
         attention_weights = []
-        for model, scope_name in izip(
+        for model, scope_name in zip(
             self.models,
             self.decoder_scope_names,
         ):
@@ -375,7 +389,8 @@ class Seq2SeqModelCaffe2EnsembleDecoder(object):
             [],
             'word_rewards',
             shape=[self.target_vocab_size],
-            value=0,
+            value=0.0,
+            dtype=core.DataType.FLOAT,
         )
         (
             self.output_token_beam_list,
@@ -417,7 +432,7 @@ class Seq2SeqModelCaffe2EnsembleDecoder(object):
 
     def load_models(self):
         db_reader = 'reader'
-        for model, scope_name in izip(
+        for model, scope_name in zip(
             self.models,
             self.decoder_scope_names,
         ):
@@ -461,7 +476,7 @@ class Seq2SeqModelCaffe2EnsembleDecoder(object):
             np.array([max_output_seq_len]).astype(dtype=np.int64),
         )
 
-        workspace.RunNetOnce(self.model.net)
+        workspace.RunNet(self.model.net)
 
         num_steps = max_output_seq_len
         score_beam_list = workspace.FetchBlob(self.output_score_beam_list)

@@ -1,4 +1,19 @@
-// Copyright 2004-present Facebook. All Rights Reserved.
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 
 #include "caffe2/core/logging.h"
 
@@ -97,13 +112,15 @@ int iPhoneVersion() {
 #if CAFFE2_ANDROID
 // whitelist of supported GPUs
 bool isSupportedRenderer() {
-  static std::unordered_set<std::string> supported_renderers = {"Adreno (TM) 540",
-                                                                "Adreno (TM) 530",
-                                                                "Adreno (TM) 510",
-                                                                "Adreno (TM) 430",
-                                                                "Adreno (TM) 418",
-                                                                "Mali-G71",
-                                                                "Mali-T880"};
+  static std::unordered_set<std::string> supported_renderers = {
+      "Adreno (TM) 540",
+      "Adreno (TM) 530",
+      "Adreno (TM) 510",
+      "Adreno (TM) 430",
+      "Adreno (TM) 418",
+      "Mali-G71",
+      "Mali-T880",
+      "NVIDIA Tegra"};
   std::string rendererStr((const char*)glGetString(GL_RENDERER));
   LOG(INFO) << "GL_RENDERER: " << rendererStr;
 

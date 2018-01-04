@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/segment_reduction_op.h"
 
 namespace caffe2 {
@@ -107,8 +123,6 @@ REGISTER_SEGMENT_DEF(
 
 #define REGISTER_REDUCER_WITH_OPS(reducer_def)                              \
   REGISTER_SEGMENT_DEF(                                                     \
-      AbstractReduceFrontDef<float, CPUContext, reducer_def>);              \
-  REGISTER_SEGMENT_DEF(                                                     \
       AbstractSortedSegmentDef<float, int, CPUContext, reducer_def>);       \
   REGISTER_SEGMENT_DEF(                                                     \
       AbstractSparseSortedSegmentDef<float, int, CPUContext, reducer_def>); \
@@ -125,14 +139,19 @@ REGISTER_SEGMENT_DEF(
                        reducer_def,                                        \
                        GradientNeedIndices>)
 
-#define REGISTER_REDUCER_WITH_ALL_OPS(reducer_def) \
-  REGISTER_REDUCER_WITH_OPS(reducer_def)           \
+#define REGISTER_REDUCER_WITH_ALL_OPS(reducer_def)             \
+  REGISTER_SEGMENT_DEF(                                        \
+      AbstractReduceFrontDef<float, CPUContext, reducer_def>); \
+  REGISTER_REDUCER_WITH_OPS(reducer_def)                       \
   REGISTER_REDUCER_WITH_LENGTH_OPS(reducer_def, false)
 
 REGISTER_REDUCER_WITH_OPS(SumReducerDef);
 REGISTER_REDUCER_WITH_LENGTH_OPS(SumReducerDef, true);
+
+REGISTER_REDUCER_WITH_OPS(MeanReducerDef);
+REGISTER_REDUCER_WITH_LENGTH_OPS(MeanReducerDef, false);
+
 REGISTER_REDUCER_WITH_ALL_OPS(WeightedSumReducerDef);
-REGISTER_REDUCER_WITH_ALL_OPS(MeanReducerDef);
 
 // SparseLengths[Sum,WeightedSum,Mean] are now implemented separately,
 // so we only rely to the historical implementation for the backward + schema.
@@ -151,9 +170,6 @@ REGISTER_SEGMENT_DEF_SCHEMA_GRADIENT_ONLY(AbstractSparseLengthsDef<
 
 REGISTER_SEGMENT_DEF_SCHEMA_GRADIENT_ONLY(
     AbstractSparseLengthsDef<float, int, CPUContext, MeanReducerDef>)
-
-REGISTER_SEGMENT_DEF(AbstractReduceBackDef<float, CPUContext, SumReducerDef>);
-REGISTER_SEGMENT_DEF(AbstractReduceBackDef<float, CPUContext, MeanReducerDef>);
 
 // Auxiliary output gradients are currently implemented only for Lengths version
 #define REGISTER_GRADIENT_WITH_MAIN_INPUT(...)                     \

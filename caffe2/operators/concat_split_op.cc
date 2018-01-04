@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/concat_split_op.h"
 
 namespace caffe2 {
@@ -20,7 +36,7 @@ OPERATOR_SCHEMA(Concat)
     .NumInputs(1, INT_MAX)
     .NumOutputs(2)
     .Arg("axis", "Which axis to concat on")
-    .Arg("order", "Either NHWC or HCWH, will concat on C axis, defaults to NCHW")
+    .Arg("order", "Either NHWC or NCHW, will concat on C axis, defaults to NCHW")
     .Arg(
         "add_axis",
         "Pass 1 to add the axis specified in arg 'axis' to all "
@@ -33,14 +49,15 @@ OPERATOR_SCHEMA(Concat)
           : GetDimFromOrderString(
                 helper.GetSingleArgument<string>("order", "NCHW"));
       bool add_axis = helper.GetSingleArgument<int>("add_axis", 0) != 0;
+      const int canonical_axis = canonical_axis_index_(axis, in[0].dims_size());
       CAFFE_ENFORCE_GT(in.size(), 0);
       vector<int> split_shape(1, in.size());
       vector<int> out_shape(in[0].dims().begin(), in[0].dims().end());
       if (add_axis) {
-        out_shape.insert(out_shape.begin() + axis, in.size());
+        out_shape.insert(out_shape.begin() + canonical_axis, in.size());
       } else {
         for (int i = 1; i < in.size(); ++i) {
-          out_shape[axis] += in[i].dims(axis);
+          out_shape[canonical_axis] += in[i].dims(canonical_axis);
         }
       }
       if (def.output_size() == 1) {

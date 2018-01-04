@@ -2,8 +2,9 @@ add_subdirectory(aten)
 add_subdirectory(gloo)
 add_subdirectory(nccl)
 add_subdirectory(nnpack)
-add_subdirectory(observers)
+add_subdirectory(prof)
 add_subdirectory(shm_mutex)
+add_subdirectory(script)
 # Finally pass the src lists back to the parent
 
 # CPU source, test sources, binary sources

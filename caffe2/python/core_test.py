@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -221,12 +236,22 @@ class TestCreateOperator(test_util.TestCase):
         self.assertEqual(op.device_option.device_type, caffe2_pb2.CUDA)
         self.assertEqual(op.device_option.cuda_gpu_id, 1)
         self.assertTrue(len(op.arg), 3)
-        self.assertEqual(op.arg[0].name, "arg1")
-        self.assertEqual(op.arg[1].name, "arg2")
-        self.assertEqual(op.arg[2].name, "arg3")
-        self.assertEqual(op.arg[0].i, 1)
-        self.assertEqual(op.arg[1].s, b"2")
-        self.assertEqual(list(op.arg[2].ints), [1, 2, 3])
+
+        # can't guarantee ordering of kwargs, so generate a set of args
+        # to test with
+        arg_map = {}
+        for arg in op.arg:
+            arg_map[arg.name] = arg
+
+        # Check all elements exist that should
+        self.assertEqual("arg1" in arg_map, True)
+        self.assertEqual("arg2" in arg_map, True)
+        self.assertEqual("arg3" in arg_map, True)
+
+        # Now test that all args were initialized correctly
+        self.assertEqual(arg_map["arg1"].i, 1)
+        self.assertEqual(arg_map["arg2"].s, b"2")
+        self.assertEqual(list(arg_map["arg3"].ints), [1, 2, 3])
 
     def testCreateWithNoneKwarg(self):
         with self.assertRaises(ValueError):
@@ -337,6 +362,7 @@ class TestExtractPredictorNet(test_util.TestCase):
         [data, label] = brew.image_input(
             model,
             "reader", ["xx/data", "label"],
+            is_test=1,
         )
         cnv = brew.conv(model, data, 'cnv', 32, 32, 4)
         a = brew.fc(model, cnv, 'a', 100, 200)
@@ -461,6 +487,41 @@ class TestCreatePlan(test_util.TestCase):
             net_2 = test_plan.Nets()[idx]
             trim_size = len(net_1.Name())
             self.assertEqual(net_1.Name(), net_2.Name()[:trim_size])
+
+
+class TestOpRegistryKey(test_util.TestCase):
+    def test_is_operator(self):
+        self.assertTrue(core.IsOperator('Relu'))
+        self.assertFalse(core.IsOperator('NOEXIST'))
+
+    def test_is_operator_with_engine(self):
+        self.assertTrue(core.IsOperatorWithEngine('Relu', 'DEFAULT'))
+        self.assertFalse(core.IsOperatorWithEngine('Relu', 'NOEXIST'))
+
+
+class TestDeviceOption(test_util.TestCase):
+    def test_check_equal_node_name(self):
+        opt1 = core.DeviceOption(0)
+        opt2 = core.DeviceOption(0)
+        self.assertTrue(core.device_option_equal(opt1, opt2))
+        opt2.node_name = 'test'
+        self.assertTrue(core.device_option_equal(opt1, opt2))
+        self.assertFalse(core.device_option_equal(opt1, opt2, ignore_node_name=False))
+        opt1.node_name = 'test'
+        self.assertTrue(core.device_option_equal(opt1, opt2, ignore_node_name=False))
+
+    def test_check_equal_default_value(self):
+        opt1 = caffe2_pb2.DeviceOption()
+        opt2 = caffe2_pb2.DeviceOption()
+        opt1.device_type = 0
+        self.assertTrue(core.device_option_equal(opt1, opt2))
+        opt1.cuda_gpu_id = 5
+        # opt1 still is on CPU, so the options should be equal
+        self.assertTrue(core.device_option_equal(opt1, opt2))
+        opt2.device_type = 0
+        self.assertTrue(core.device_option_equal(opt1, opt2))
+        opt1.device_type = 1
+        self.assertFalse(core.device_option_equal(opt1, opt2))
 
 
 @unittest.skipIf(not workspace.has_gpu_support, 'No GPU support')

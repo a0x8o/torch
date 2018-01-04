@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_OPERATORS_H_SOFTMAX_OP_H_
 #define CAFFE2_OPERATORS_H_SOFTMAX_OP_H_
 
@@ -29,7 +45,7 @@ class HSoftmaxOpBase : public Operator<Context> {
   Tensor<Context> sum_multiplier_;
   Tensor<Context> bias_multiplier_;
   static constexpr T kLOG_THRESHOLD() {
-    return 1e-20;
+    return 1e-20f;
   }
   static std::unordered_map<int, PathProto> getHierarchyForLabels(
       int M,
@@ -116,7 +132,7 @@ class HSoftmaxSearchOp final : public HSoftmaxOp<T, Context> {
   HSoftmaxSearchOp(const OperatorDef& operator_def, Workspace* ws)
       : HSoftmaxOp<T, Context>(operator_def, ws),
         top_n_(OperatorBase::GetSingleArgument<int>("topN", 5)),
-        beam_(OperatorBase::GetSingleArgument<float>("beam", 0.01)) {
+        beam_(OperatorBase::GetSingleArgument<float>("beam", 0.01f)) {
     CAFFE_ENFORCE(tree_.ParseFromString(
         OperatorBase::GetSingleArgument<string>("tree", "")));
   }

@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -18,15 +33,22 @@ from caffe2.python.model_helper import ModelHelper
 def _cudnn_supports(
         dilation=False,
         nhwc=False,
+        backward=False,
 ):
     """Return True if cuDNN supports this configuration."""
     v = workspace.GetCuDNNVersion()
-    if dilation and v < 6000:
-        # Dilation not supported until v6
-        return False
-    if dilation and nhwc:
-        # Dilation and NHWC not supported together
-        return False
+    if backward:
+        if nhwc:
+            # nhwc isn't supported in backward ops.
+            return False
+    else:
+        # Forward mode.
+        if dilation and v < 6000:
+            # Dilation not supported until v6
+            return False
+        if dilation and nhwc:
+            # Dilation and NHWC not supported together
+            return False
     return True
 
 
@@ -177,9 +199,10 @@ class TestConvolution(hu.HypothesisTestCase):
                                    batch_size, order, engine, use_bias, gc, dc):
         dkernel = dilation * (kernel - 1) + 1
 
-        if gc.device_type == caffe2_pb2.CUDA and engine == 'CUDNN':
+        if engine == 'CUDNN':
             assume(_cudnn_supports(dilation=(dilation > 1),
-                                   nhwc=(order == 'NHWC')))
+                                   nhwc=(order == 'NHWC'),
+                                   backward=True))
 
         assume(engine != "MKLDNN" or use_bias is True)
 

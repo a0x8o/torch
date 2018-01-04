@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 # TODO(jiayq): as more and more tests are moving to hypothesis test, we
 # can gradually remove this test script. DO NOT ADD MORE TESTS TO THIS
 # FILE.
@@ -504,6 +519,46 @@ class TestIf(test_util.TestCase):
             self.assertEqual(trained_values.size, len(values))
             for idx in range(len(trained_values)):
                 self.assertTrue(abs(trained_values[idx] - values[idx]) < train_eps)
+
+
+class TestWhile(test_util.TestCase):
+    def testWhile(self):
+        with NetBuilder(_use_control_ops=True) as nb:
+            ops.Copy(ops.Const(0), "i")
+            ops.Copy(ops.Const(1), "one")
+            ops.Copy(ops.Const(2), "two")
+            ops.Copy(ops.Const(2.0), "x")
+            ops.Copy(ops.Const(3.0), "y")
+            ops.Copy(ops.Const(2.0), "z")
+            # raises x to the power of 4 and y to the power of 2
+            # and z to the power of 3
+            with ops.WhileNet():
+                with ops.Condition():
+                    ops.Add(["i", "one"], "i")
+                    ops.LE(["i", "two"])
+                ops.Pow("x", "x", exponent=2.0)
+                with ops.IfNet(ops.LT(["i", "two"])):
+                    ops.Pow("y", "y", exponent=2.0)
+                with ops.Else():
+                    ops.Pow("z", "z", exponent=3.0)
+
+            ops.Add(["x", "y"], "x_plus_y")
+            ops.Add(["x_plus_y", "z"], "s")
+
+        assert len(nb.get()) == 1, "Expected a single net produced"
+        net = nb.get()[0]
+
+        net.AddGradientOperators(["s"])
+        workspace.RunNetOnce(net)
+        # (x^4)' = 4x^3
+        self.assertAlmostEqual(workspace.FetchBlob("x_grad"), 32)
+        self.assertAlmostEqual(workspace.FetchBlob("x"), 16)
+        # (y^2)' = 2y
+        self.assertAlmostEqual(workspace.FetchBlob("y_grad"), 6)
+        self.assertAlmostEqual(workspace.FetchBlob("y"), 9)
+        # (z^3)' = 3z^2
+        self.assertAlmostEqual(workspace.FetchBlob("z_grad"), 12)
+        self.assertAlmostEqual(workspace.FetchBlob("z"), 8)
 
 
 if __name__ == '__main__':

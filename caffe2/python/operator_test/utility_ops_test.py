@@ -1,15 +1,31 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
 from caffe2.python import core, workspace
-from hypothesis import given
+from hypothesis import assume, given
+from caffe2.proto import caffe2_pb2
 import caffe2.python.hypothesis_test_util as hu
 import hypothesis.strategies as st
 import numpy as np
 import random
-
+import unittest
 
 class TestUtilityOps(hu.HypothesisTestCase):
 
@@ -55,13 +71,17 @@ class TestUtilityOps(hu.HypothesisTestCase):
             outputs_with_grads=[0],
         )
 
-    @given(dtype=st.sampled_from([np.float32, np.int32, np.int64]),
+    @given(dtype=st.sampled_from([np.float32, np.int32]),
            ndims=st.integers(min_value=1, max_value=5),
            seed=st.integers(min_value=0, max_value=65536),
            null_axes=st.booleans(),
            engine=st.sampled_from(['CUDNN', None]),
            **hu.gcs)
     def test_transpose(self, dtype, ndims, seed, null_axes, engine, gc, dc):
+        if (gc.device_type == caffe2_pb2.CUDA and engine == "CUDNN"):
+            # cudnn 5.1 does not support int.
+            assume(workspace.GetCuDNNVersion() >= 6000 or dtype != np.int32) 
+
         dims = (np.random.rand(ndims) * 16 + 1).astype(np.int32)
         X = (np.random.rand(*dims) * 16).astype(dtype)
 
@@ -85,6 +105,7 @@ class TestUtilityOps(hu.HypothesisTestCase):
 
         self.assertReferenceChecks(gc, op, [X, axes],
                                    transpose_ref)
+
 
     @given(m=st.integers(5, 10), n=st.integers(5, 10),
            o=st.integers(5, 10), nans=st.booleans(), **hu.gcs)
@@ -143,6 +164,7 @@ class TestUtilityOps(hu.HypothesisTestCase):
         X = np.random.rand(n, m, d).astype(np.float32)
         Y = np.random.rand(n, m, d).astype(np.float32)
         Z = np.random.rand(n, m, d).astype(np.float32)
+        inputs = [X, Y, Z]
 
         def max_op(X, Y, Z):
             return [np.maximum(np.maximum(X, Y), Z)]
@@ -156,9 +178,10 @@ class TestUtilityOps(hu.HypothesisTestCase):
         self.assertReferenceChecks(
             device_option=gc,
             op=op,
-            inputs=[X, Y, Z],
+            inputs=inputs,
             reference=max_op,
         )
+        self.assertDeviceChecks(dc, op, inputs, [0])
 
     @given(n=st.integers(4, 5), m=st.integers(6, 7),
            d=st.integers(2, 3), **hu.gcs)
@@ -168,6 +191,7 @@ class TestUtilityOps(hu.HypothesisTestCase):
         Y = np.random.rand(n, m, d).astype(np.float32)
         Z = np.random.rand(n, m, d).astype(np.float32)
         mx = np.maximum(np.maximum(X, Y), Z)
+        inputs = [mx, go, X, Y, Z]
 
         def max_grad_op(mx, go, X, Y, Z):
             def mx_grad(a):
@@ -184,9 +208,65 @@ class TestUtilityOps(hu.HypothesisTestCase):
         self.assertReferenceChecks(
             device_option=gc,
             op=op,
-            inputs=[mx, go, X, Y, Z],
+            inputs=inputs,
             reference=max_grad_op,
         )
+        self.assertDeviceChecks(dc, op, inputs, [0, 1, 2])
+
+    @given(n=st.integers(4, 5), m=st.integers(6, 7),
+           d=st.integers(2, 3), **hu.gcs)
+    def test_elementwise_min(self, n, m, d, gc, dc):
+        X = np.random.rand(n, m, d).astype(np.float32)
+        Y = np.random.rand(n, m, d).astype(np.float32)
+        Z = np.random.rand(n, m, d).astype(np.float32)
+        inputs = [X, Y, Z]
+
+        def min_op(X, Y, Z):
+            return [np.minimum(np.minimum(X, Y), Z)]
+
+        op = core.CreateOperator(
+            "Min",
+            ["X", "Y", "Z"],
+            ["mx"]
+        )
+
+        self.assertReferenceChecks(
+            device_option=gc,
+            op=op,
+            inputs=inputs,
+            reference=min_op,
+        )
+        self.assertDeviceChecks(dc, op, inputs, [0])
+
+    @given(n=st.integers(4, 5), m=st.integers(6, 7),
+           d=st.integers(2, 3), **hu.gcs)
+    def test_elementwise_min_grad(self, n, m, d, gc, dc):
+        go = np.random.rand(n, m, d).astype(np.float32)
+        X = np.random.rand(n, m, d).astype(np.float32)
+        Y = np.random.rand(n, m, d).astype(np.float32)
+        Z = np.random.rand(n, m, d).astype(np.float32)
+        mx = np.minimum(np.minimum(X, Y), Z)
+        inputs = [mx, go, X, Y, Z]
+
+        def min_grad_op(mx, go, X, Y, Z):
+            def mx_grad(a):
+                return go * (mx == a)
+
+            return [mx_grad(a) for a in [X, Y, Z]]
+
+        op = core.CreateOperator(
+            "MinGradient",
+            ["mx", "go", "X", "Y", "Z"],
+            ["gX", "gY", "gZ"]
+        )
+
+        self.assertReferenceChecks(
+            device_option=gc,
+            op=op,
+            inputs=inputs,
+            reference=min_grad_op,
+        )
+        self.assertDeviceChecks(dc, op, inputs, [0, 1, 2])
 
     @given(
         inputs=hu.lengths_tensor().flatmap(

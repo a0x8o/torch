@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/math_ops.h"
 #include "caffe2/utils/math.h"
 
@@ -94,7 +110,14 @@ class GetPowGradient : public GradientMakerBase {
     scale_arg.set_f(exponent);
     Argument pow_arg;
     pow_arg.set_name("exponent");
-    pow_arg.set_f(exponent - 1);
+    if (I(0) != O(0)) {
+      pow_arg.set_f(exponent - 1);
+    } else {
+      LOG(WARNING) << "In-place Pow gradient, possible loss of precision";
+      constexpr float kEps = 1e-12;
+      CAFFE_ENFORCE(std::fabs(exponent) > kEps);
+      pow_arg.set_f((exponent - 1) / exponent);
+    }
     return vector<OperatorDef>{CreateOperatorDef(
                                    "Pow",
                                    "",

@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "AndroidGLContext.h"
 #include "caffe2/core/logging.h"
 #include "gl3stub.h"
@@ -7,7 +23,9 @@ namespace {
 
 static const std::unordered_map<std::string, GL_Renderer>& renderer_map() {
   static std::unordered_map<std::string, GL_Renderer> m = {
-      {"Adreno", Adreno}, {"Mali", Mali} /*, {"PowerVR", PowerVR} */};
+      {"Adreno", Adreno},
+      {"Mali", Mali},
+      {"NVIDIA", Tegra} /*, {"PowerVR", PowerVR} */};
   return m;
 }
 

@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -51,6 +66,76 @@ def lstm_unit(hidden_t_prev, cell_t_prev, gates,
     hidden_t = hidden_t.reshape(1, N, D)
     cell_t = cell_t.reshape(1, N, D)
     return hidden_t, cell_t
+
+
+def layer_norm_with_scale_and_bias_ref(X, scale, bias, axis=-1, epsilon=1e-4):
+    left = np.prod(X.shape[:axis])
+    reshaped = np.reshape(X, [left, -1])
+    mean = np.mean(reshaped, axis=1).reshape([left, 1])
+    stdev = np.sqrt(
+        np.mean(np.square(reshaped), axis=1).reshape([left, 1]) -
+        np.square(mean) + epsilon
+    )
+    norm = (reshaped - mean) / stdev
+    norm = np.reshape(norm, X.shape)
+    adjusted = scale * norm + bias
+
+    return adjusted
+
+
+def layer_norm_lstm_reference(
+    input,
+    hidden_input,
+    cell_input,
+    gates_w,
+    gates_b,
+    gates_t_norm_scale,
+    gates_t_norm_bias,
+    seq_lengths,
+    forget_bias,
+    drop_states=False
+):
+    T = input.shape[0]
+    N = input.shape[1]
+    G = input.shape[2]
+    D = hidden_input.shape[hidden_input.ndim - 1]
+    hidden = np.zeros(shape=(T + 1, N, D))
+    cell = np.zeros(shape=(T + 1, N, D))
+    assert hidden.shape[0] == T + 1
+    assert cell.shape[0] == T + 1
+    assert hidden.shape[1] == N
+    assert cell.shape[1] == N
+    cell[0, :, :] = cell_input
+    hidden[0, :, :] = hidden_input
+    for t in range(T):
+        input_t = input[t].reshape(1, N, G)
+        print(input_t.shape)
+        hidden_t_prev = hidden[t].reshape(1, N, D)
+        cell_t_prev = cell[t].reshape(1, N, D)
+        gates = np.dot(hidden_t_prev, gates_w.T) + gates_b
+        gates = gates + input_t
+
+        gates = layer_norm_with_scale_and_bias_ref(
+            gates, gates_t_norm_scale, gates_t_norm_bias
+        )
+
+        hidden_t, cell_t = lstm_unit(
+            hidden_t_prev=hidden_t_prev,
+            cell_t_prev=cell_t_prev,
+            gates=gates,
+            seq_lengths=seq_lengths,
+            timestep=t,
+            forget_bias=forget_bias,
+            drop_states=drop_states,
+        )
+        hidden[t + 1] = hidden_t
+        cell[t + 1] = cell_t
+    return (
+        hidden[1:],
+        hidden[-1].reshape(1, N, D),
+        cell[1:],
+        cell[-1].reshape(1, N, D)
+    )
 
 
 def lstm_reference(input, hidden_input, cell_input,
@@ -597,6 +682,64 @@ def milstm_reference(
     )
 
 
+def layer_norm_milstm_reference(
+        input,
+        hidden_input,
+        cell_input,
+        gates_w,
+        gates_b,
+        alpha,
+        beta1,
+        beta2,
+        b,
+        gates_t_norm_scale,
+        gates_t_norm_bias,
+        seq_lengths,
+        forget_bias,
+        drop_states=False):
+    T = input.shape[0]
+    N = input.shape[1]
+    G = input.shape[2]
+    D = hidden_input.shape[hidden_input.ndim - 1]
+    hidden = np.zeros(shape=(T + 1, N, D))
+    cell = np.zeros(shape=(T + 1, N, D))
+    assert hidden.shape[0] == T + 1
+    assert cell.shape[0] == T + 1
+    assert hidden.shape[1] == N
+    assert cell.shape[1] == N
+    cell[0, :, :] = cell_input
+    hidden[0, :, :] = hidden_input
+    for t in range(T):
+        input_t = input[t].reshape(1, N, G)
+        hidden_t_prev = hidden[t].reshape(1, N, D)
+        cell_t_prev = cell[t].reshape(1, N, D)
+        gates = np.dot(hidden_t_prev, gates_w.T) + gates_b
+        gates = (alpha * gates * input_t) + \
+                    (beta1 * gates) + \
+                    (beta2 * input_t) + \
+                    b
+        gates = layer_norm_with_scale_and_bias_ref(
+            gates, gates_t_norm_scale, gates_t_norm_bias
+        )
+        hidden_t, cell_t = lstm_unit(
+            hidden_t_prev,
+            cell_t_prev,
+            gates,
+            seq_lengths,
+            t,
+            forget_bias,
+            drop_states=drop_states,
+        )
+        hidden[t + 1] = hidden_t
+        cell[t + 1] = cell_t
+    return (
+        hidden[1:],
+        hidden[-1].reshape(1, N, D),
+        cell[1:],
+        cell[-1].reshape(1, N, D)
+    )
+
+
 def lstm_input():
     '''
     Create input tensor where each dimension is from 1 to 4, ndim=3 and
@@ -946,8 +1089,12 @@ class RNNCellTest(hu.HypothesisTestCase):
     @ht_settings(max_examples=3, timeout=100)
     @utils.debug
     def test_lstm_main(self, **kwargs):
-        for lstm_type in [(rnn_cell.LSTM, lstm_reference),
-                          (rnn_cell.MILSTM, milstm_reference)]:
+        for lstm_type in [
+            (rnn_cell.LSTM, lstm_reference),
+            (rnn_cell.MILSTM, milstm_reference),
+            (rnn_cell.LayerNormLSTM, layer_norm_lstm_reference),
+            (rnn_cell.LayerNormMILSTM, layer_norm_milstm_reference),
+        ]:
             for outputs_with_grads in [[0], [1], [0, 1, 2, 3]]:
                 for memory_optim in [False, True]:
                     self.lstm_base(lstm_type,
@@ -1046,10 +1193,10 @@ class RNNCellTest(hu.HypothesisTestCase):
         self.assertTrue('seqlengths' in predict_net.Proto().external_input)
         for einp in predict_net.Proto().external_input:
             if einp == 'seqlengths':
-                    workspace.FeedBlob(
-                        "seqlengths",
-                        np.array([10] * 4, dtype=np.int32)
-                    )
+                workspace.FeedBlob(
+                    "seqlengths",
+                    np.array([10] * 4, dtype=np.int32)
+                )
             else:
                 workspace.FeedBlob(
                     einp,
@@ -1063,18 +1210,15 @@ class RNNCellTest(hu.HypothesisTestCase):
         self.assertTrue(workspace.RunNet(predict_net.Proto().name))
 
         # Validate device options set correctly for the RNNs
-        import google.protobuf.text_format as protobuftx
         for op in predict_net.Proto().op:
             if op.type == 'RecurrentNetwork':
                 for arg in op.arg:
                     if arg.name == "step_net":
-                        step_proto = caffe2_pb2.NetDef()
-                        protobuftx.Merge(arg.s.decode("ascii"), step_proto)
-                        for step_op in step_proto.op:
+                        for step_op in arg.n.op:
                             self.assertEqual(0, step_op.device_option.device_type)
                             self.assertEqual(1, step_op.device_option.cuda_gpu_id)
                     elif arg.name == 'backward_step_net':
-                        self.assertEqual(b"", arg.s)
+                        self.assertEqual(caffe2_pb2.NetDef(), arg.n)
 
     def test_lstm_params(self):
         model = ModelHelper(name="lstm_params_test")
@@ -1105,6 +1249,24 @@ class RNNCellTest(hu.HypothesisTestCase):
                 initial_states=None,
                 dim_in=20,
                 dim_out=[40, 20],
+                scope="test",
+                drop_states=True,
+                return_last_layer_only=True,
+            )
+        for param in model.GetParams():
+            self.assertNotEqual(model.get_param_info(param), None)
+
+    def test_layer_norm_lstm_params(self):
+        model = ModelHelper(name="layer_norm_lstm_params_test")
+
+        with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU, 0)):
+            output, _, _, _ = rnn_cell.LayerNormLSTM(
+                model=model,
+                input_blob="input",
+                seq_lengths="seqlengths",
+                initial_states=None,
+                dim_in=20,
+                dim_out=40,
                 scope="test",
                 drop_states=True,
                 return_last_layer_only=True,

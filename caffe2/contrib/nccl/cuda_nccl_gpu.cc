@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "cuda_nccl_gpu.h"
 
 namespace caffe2 {
@@ -106,6 +122,12 @@ class ncclTypeWrapper<float> {
   static const ncclDataType_t type = ncclFloat;
 };
 
+template <>
+class ncclTypeWrapper<int> {
+ public:
+  static const ncclDataType_t type = ncclInt;
+};
+
 #ifdef CAFFE_HAS_CUDA_FP16
 template <>
 class ncclTypeWrapper<float16> {
@@ -118,6 +140,8 @@ template <typename T, typename InitF, typename F>
 void runNCCL(const NCCLExecution& ex, InitF&& init_f, F&& f) {
   // do initialization
   for (auto i = 0; i < ex.elements.size(); ++i) {
+    auto& ctx = ex.elements[i];
+    DeviceGuard g(ctx.device);
     init_f(ex.elements[i]);
   }
 
@@ -139,7 +163,7 @@ void runNCCL(const NCCLExecution& ex, InitF&& init_f, F&& f) {
     std::lock_guard<std::mutex> lock(CUDAContext::mutex());
 
 #if NCCL_VERSION_MIN(2, 0, 0)
-    ncclGroupStart();
+    CAFFE_NCCL_CHECK(ncclGroupStart());
 #endif
 
     for (auto i = 0; i < ex.elements.size(); ++i) {
@@ -155,7 +179,7 @@ void runNCCL(const NCCLExecution& ex, InitF&& init_f, F&& f) {
     }
 
 #if NCCL_VERSION_MIN(2, 0, 0)
-    ncclGroupEnd();
+    CAFFE_NCCL_CHECK(ncclGroupEnd());
 #endif
 
     for (auto i = 0; i < ex.elements.size(); ++i) {
@@ -305,6 +329,7 @@ void NCCL<T>::ReduceScatter(const NCCLExecution& ex) {
 
 // Explicit instantiation
 template class NCCL<float>;
+template class NCCL<int>;
 #ifdef CAFFE_HAS_CUDA_FP16
 template class NCCL<float16>;
 #endif

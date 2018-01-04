@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 ## @package predictor_exporter
 # Module caffe2.python.predictor.predictor_exporter
 from __future__ import absolute_import
@@ -110,12 +125,12 @@ class PredictorExportMeta(collections.namedtuple(
                                    self.name)
 
 
-def prepare_prediction_net(filename, db_type):
+def prepare_prediction_net(filename, db_type, device_option=None):
     '''
     Helper function which loads all required blobs from the db
     and returns prediction net ready to be used
     '''
-    metanet_def = load_from_db(filename, db_type)
+    metanet_def = load_from_db(filename, db_type, device_option)
 
     global_init_net = utils.GetNet(
         metanet_def, predictor_constants.GLOBAL_INIT_NET_TYPE)

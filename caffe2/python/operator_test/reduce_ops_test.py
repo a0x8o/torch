@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -31,7 +46,7 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
         self.assertGradientChecks(
             device, op, [in_data], 0, [0], stepsize=1e-2, threshold=1e-2)
 
-    @given(num_reduce_dim=st.integers(1, 3), **hu.gcs)
+    @given(num_reduce_dim=st.integers(0, 4), **hu.gcs)
     def test_reduce_front_sum(self, num_reduce_dim, gc, dc):
         X = np.random.rand(7, 4, 3, 5).astype(np.float32)
 
@@ -40,7 +55,7 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
 
         self.reduce_op_test("ReduceFrontSum", ref_sum, X, num_reduce_dim, gc)
 
-    @given(num_reduce_dim=st.integers(1, 3), **hu.gcs)
+    @given(num_reduce_dim=st.integers(0, 4), **hu.gcs)
     def test_reduce_front_mean(self, num_reduce_dim, gc, dc):
         X = np.random.rand(6, 7, 8, 2).astype(np.float32)
 
@@ -49,7 +64,7 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
 
         self.reduce_op_test("ReduceFrontMean", ref_mean, X, num_reduce_dim, gc)
 
-    @given(num_reduce_dim=st.integers(1, 3), **hu.gcs)
+    @given(num_reduce_dim=st.integers(0, 4), **hu.gcs)
     def test_reduce_front_max(self, num_reduce_dim, gc, dc):
         X = np.random.rand(6, 7, 8, 2).astype(np.float32)
 
@@ -72,8 +87,8 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
 
         # Skip gradient check because it is too unreliable with max.
         # Just check CPU and CUDA have same results
-        Y = ref_frontmax(X)[0].astype(np.float32)
-        dY = np.random.rand(*Y.shape).astype(np.float32)
+        Y = np.array(ref_frontmax(X)[0]).astype(np.float32)
+        dY = np.array(np.random.rand(*Y.shape)).astype(np.float32)
         grad_op = core.CreateOperator(
             "ReduceFrontMaxGradient",
             ["dY", "X", "Y"],
@@ -82,7 +97,7 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
         )
         self.assertDeviceChecks(dc, grad_op, [dY, X, Y], [0])
 
-    @given(num_reduce_dim=st.integers(1, 3), **hu.gcs)
+    @given(num_reduce_dim=st.integers(0, 4), **hu.gcs)
     def test_reduce_back_max(self, num_reduce_dim, gc, dc):
         X = np.random.rand(6, 7, 8, 2).astype(np.float32)
 
@@ -105,8 +120,8 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
 
         # Skip gradient check because it is too unreliable with max
         # Just check CPU and CUDA have same results
-        Y = ref_backmax(X)[0].astype(np.float32)
-        dY = np.random.rand(*Y.shape).astype(np.float32)
+        Y = np.array(ref_backmax(X)[0]).astype(np.float32)
+        dY = np.array(np.random.rand(*Y.shape)).astype(np.float32)
         grad_op = core.CreateOperator(
             "ReduceBackMaxGradient",
             ["dY", "X", "Y"],
@@ -115,7 +130,7 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
         )
         self.assertDeviceChecks(dc, grad_op, [dY, X, Y], [0])
 
-    @given(num_reduce_dim=st.integers(1, 3), **hu.gcs)
+    @given(num_reduce_dim=st.integers(0, 4), **hu.gcs)
     def test_reduce_back_sum(self, num_reduce_dim, dc, gc):
         X = np.random.rand(6, 7, 8, 2).astype(np.float32)
 
@@ -124,7 +139,7 @@ class TestReduceFrontReductions(hu.HypothesisTestCase):
 
         self.reduce_op_test("ReduceBackSum", ref_sum, X, num_reduce_dim, gc)
 
-    @given(num_reduce_dim=st.integers(1, 3), **hu.gcs)
+    @given(num_reduce_dim=st.integers(0, 4), **hu.gcs)
     def test_reduce_back_mean(self, num_reduce_dim, dc, gc):
         num_reduce_dim = 2
         X = np.random.rand(6, 7, 8, 2).astype(np.float32)

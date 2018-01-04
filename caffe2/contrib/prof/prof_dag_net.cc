@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "prof_dag_net.h"
 
 #include <cmath>
@@ -43,12 +59,12 @@ void ProfDAGNet::ValidateOpTensorDevices() {
   }
 }
 
-bool ProfDAGNet::RunAsync() {
+bool ProfDAGNet::DoRunAsync() {
   runs_++;
 
   // don't collect statistics from first run
   if (runs_ <= 1) {
-    bool success = DAGNetBase::RunAsync();
+    bool success = DAGNetBase::DoRunAsync();
     ValidateOpTensorDevices();
     return success;
   }
@@ -63,7 +79,7 @@ bool ProfDAGNet::RunAsync() {
 
   // create a copy and later collect the differences
   vector<Stats> time_per_op_run(time_per_op_);
-  bool success = DAGNetBase::RunAsync();
+  bool success = DAGNetBase::DoRunAsync();
 
   // aggregate this run's stats per operator type
   CaffeMap<string, float> time_per_op_type_run;
@@ -102,7 +118,34 @@ ProfDAGProtos ProfDAGNet::GetOperatorStats() {
   return prof_dag_protos;
 }
 
-bool ProfDAGNet::RunAt(const std::vector<int>& chain) {
+// GetPerOperatorCost collects the execution time of each operator, the output
+// is formatted as a map: (netName__opIndex__opType, cost)
+ProfDAGProtos ProfDAGNet::GetPerOperatorCost() {
+  CAFFE_ENFORCE(
+      time_per_op_.size() == operator_nodes_.size(),
+      "Data collected for ",
+      time_per_op_.size(),
+      " ops, expected ",
+      operator_nodes_.size(),
+      " ops.");
+
+  ProfDAGProtos prof_dag_protos;
+  for (int idx = 0; idx < operator_nodes_.size(); idx++) {
+    const auto& op = operator_nodes_[idx].operator_;
+    const auto& def = op->debug_def();
+    const string& op_type = def.type();
+
+    auto buf = prof_dag_protos.add_stats();
+    std::string op_output_name =
+        name_ + "___" + to_string(idx) + "___" + op_type;
+    std::pair<std::string, Stats> op_stat =
+        std::pair<std::string, Stats>(op_output_name, time_per_op_[idx]);
+    buf->CopyFrom(ProtoMsg(op_stat));
+  }
+  return prof_dag_protos;
+}
+
+bool ProfDAGNet::RunAt(int /* unused */, const std::vector<int>& chain) {
   bool success = true;
   Timer timer;
   for (const auto idx : chain) {

@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_OPERATORS_CREATE_SCOPE_OP_H_
 #define CAFFE2_OPERATORS_CREATE_SCOPE_OP_H_
 
@@ -44,7 +60,25 @@ class WorkspaceStack {
     if (top_ == workspaces_.size() - 1) {
       workspaces_.push_back(
           std::make_shared<Workspace>(parent_ws, blob_bindings));
+    } else {
+      // when reusing workspace, make sure copies of external blobs are
+      // removed and blob bindings are set
+      auto& workspace = workspaces_[top_ + 1];
+      const auto& local_blobs = workspace->LocalBlobs();
+      std::unordered_set<std::string> local_blobs_set;
+      local_blobs_set.insert(local_blobs.begin(), local_blobs.end());
+      bool found_local_copy = false;
+      for (const auto& blob_pair : blob_bindings) {
+        if (local_blobs_set.count(blob_pair.first)) {
+          workspace->RemoveBlob(blob_pair.first);
+          found_local_copy = true;
+        }
+      }
+      if (found_local_copy) {
+        workspace->AddBlobMapping(parent_ws, blob_bindings);
+      }
     }
+
     return workspaces_[++top_];
   }
 
@@ -69,14 +103,29 @@ class WorkspaceStack {
       return nullptr;
     }
     auto& grad_workspace = workspaces_[top_];
-    grad_workspace->AddBlobMapping(parent_ws, grad_blob_bindings);
+    grad_workspace->AddBlobMapping(parent_ws, grad_blob_bindings, true);
     --top_;
     return grad_workspace;
+  }
+
+  std::shared_ptr<Workspace> reuseLastForwardWorkspace(
+      Workspace* parent_ws,
+      const std::unordered_map<std::string, std::string>& blob_bindings) {
+    checkStack();
+    if (top_ < 0) {
+      return nullptr;
+    }
+    workspaces_[top_]->AddBlobMapping(parent_ws, blob_bindings);
+    return workspaces_[top_];
   }
 
   void clear() {
     checkStack();
     top_ = -1;
+  }
+
+  bool empty() const {
+    return top_ < 0;
   }
 
  private:
@@ -112,6 +161,16 @@ template <class Context>
 class CreateScopeOp final : public Operator<Context> {
  public:
   CreateScopeOp(const OperatorDef& operator_def, Workspace* ws)
+      : Operator<Context>(operator_def, ws) {}
+
+  USE_OPERATOR_CONTEXT_FUNCTIONS;
+  bool RunOnDevice() override;
+};
+
+template <class Context>
+class HasScopeOp final : public Operator<Context> {
+ public:
+  HasScopeOp(const OperatorDef& operator_def, Workspace* ws)
       : Operator<Context>(operator_def, ws) {}
 
   USE_OPERATOR_CONTEXT_FUNCTIONS;

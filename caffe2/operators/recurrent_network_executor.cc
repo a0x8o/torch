@@ -1,8 +1,29 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/operators/recurrent_network_executor.h"
 
 #include "caffe2/core/timer.h"
 
 namespace caffe2 {
+
+/**
+ * Implementation of RecurrentNetworkExecutor that uses thread pool for
+ * multithreaded execution of RNNs. Used with CPU.
+ */
 
 template <>
 std::unique_ptr<RecurrentNetworkExecutorBase> createRNNExecutor<CPUContext>(
@@ -12,25 +33,30 @@ std::unique_ptr<RecurrentNetworkExecutorBase> createRNNExecutor<CPUContext>(
     ArgumentHelper rnn_args) {
   auto* exec = new ThreadedRecurrentNetworkExecutor(
       step_net_def, recurrent_input_map, timestep_blob);
-  int num_threads = rnn_args.GetSingleArgument<int>("rnn_executor.num_threads", 0);
+  int num_threads =
+      rnn_args.GetSingleArgument<int>("rnn_executor.num_threads", 0);
   if (num_threads > 0) {
     exec->setNumThreads(num_threads);
     LOG(INFO) << "Set num threads: " << num_threads;
   }
+  exec->debug_ = rnn_args.GetSingleArgument<int>("rnn_executor_debug", 0);
   return std::unique_ptr<RecurrentNetworkExecutorBase>(exec);
 }
 
+/**
+ * Run forwardpass with T timesteps.
+ */
 bool ThreadedRecurrentNetworkExecutor::Run(int T) {
   CAFFE_ENFORCE(timestep_ops_.size() >= T);
   countdown_ = T * timestep_ops_[0].size();
   finished_timesteps_ = 0;
 
-  // Frontier
-  CHECK(job_queue_.size() == 0);
+  CHECK(task_queue_.size() == 0);
 
   for (auto& rnn_op : timestep_ops_[0]) {
+    // Launch "frontier"-ops first.
     if (rnn_op.frontier) {
-      job_queue_.Push(OpJob(0, rnn_op.order, T, 1));
+      task_queue_.Push(OpTask(0, rnn_op.order, T, 1));
     }
   }
 
@@ -38,17 +64,20 @@ bool ThreadedRecurrentNetworkExecutor::Run(int T) {
   return true;
 }
 
+/**
+ * Run backward pass with T timesteps.
+ */
 bool ThreadedRecurrentNetworkExecutor::RunBackwards(int T) {
   CAFFE_ENFORCE(timestep_ops_.size() >= T);
   countdown_ = T * timestep_ops_[0].size();
   finished_timesteps_ = 0;
 
   // Frontier
-  CHECK(job_queue_.size() == 0);
+  CHECK(task_queue_.size() == 0);
 
   for (auto& rnn_op : timestep_ops_[T - 1]) {
     if (rnn_op.frontier) {
-      job_queue_.Push(OpJob(T - 1, rnn_op.order, T, -1));
+      task_queue_.Push(OpTask(T - 1, rnn_op.order, T, -1));
     }
   }
 
@@ -56,7 +85,11 @@ bool ThreadedRecurrentNetworkExecutor::RunBackwards(int T) {
   return true;
 }
 
-void ThreadedRecurrentNetworkExecutor::RunOp(OpJob job, int thread_id) {
+/**
+ * Runs a single op and updates its dependencies when finished. If
+ * dependent ops are ready to run, adds them to the task_queue.
+ */
+void ThreadedRecurrentNetworkExecutor::RunOp(OpTask job, int thread_id) {
   bool first_timestep =
       ((job.forward() && job.timestep == 0) ||
        (job.backward() && job.timestep == job.T - 1));
@@ -107,34 +140,41 @@ void ThreadedRecurrentNetworkExecutor::RunOp(OpJob job, int thread_id) {
     }
 
     if (proc_inputs == num_req_inputs || num_req_inputs == 0) {
-      job_queue_.Push(OpJob(t, depidx, job.T, job.direction));
+      task_queue_.Push(OpTask(t, depidx, job.T, job.direction));
     }
   }
 
+  // Decrement countdown: when at zero, we have run all ops and can
+  // notify the caller thread.
   if (countdown_.fetch_sub(1) == 1) {
-    CAFFE_ENFORCE_EQ(0, job_queue_.size());
+    CAFFE_ENFORCE_EQ(0, task_queue_.size());
     std::unique_lock<std::mutex> lk(countdown_mtx_);
     cv_.notify_one();
   }
 }
 
+/**
+ * Run-loop for executor threads: pop tasks from task_queue and execute
+ * them with RunOp().
+ */
 void ThreadedRecurrentNetworkExecutor::WorkerFunction() {
   size_t num_jobs = 0;
   static std::atomic<int> seq(0);
   int id = seq.fetch_add(1);
 
   while (!failed_) {
-    OpJob job;
-    if (!job_queue_.Pop(&job)) {
+    OpTask job;
+    if (!task_queue_.Pop(&job)) {
       break;
     }
 
-    // Check for limited timestep parallelism
+    // Check for limited timestep parallelism, and if too many timesteps would
+    // be started concurrently, return the task to task queue.
     if (max_parallel_timesteps_ > 0) {
       int t = (job.direction == 1 ? job.timestep : job.T - job.timestep + 1);
       if (t - finished_timesteps_ >= max_parallel_timesteps_) {
         // Return to queue
-        job_queue_.Push(job);
+        task_queue_.Push(job);
         continue;
       }
     }
@@ -148,10 +188,9 @@ void ThreadedRecurrentNetworkExecutor::WorkerFunction() {
     } catch (::caffe2::EnforceNotMet& enf) {
       std::unique_lock<std::mutex> lk(countdown_mtx_);
       LOG(ERROR) << "Crash at thread " << id << " timestep " << job.timestep
-                 << " op:"
-                 << ProtoDebugString(step_net_def_.op(job.op_idx))
+                 << " op:" << ProtoDebugString(step_net_def_.op(job.op_idx))
                  << enf.what();
-      job_queue_.NoMoreJobs();
+      task_queue_.NoMoreJobs();
       failed_ = true;
       cv_.notify_one();
       return;
@@ -160,33 +199,40 @@ void ThreadedRecurrentNetworkExecutor::WorkerFunction() {
   VLOG(1) << "Worker exiting, did run: " << num_jobs << " jobs";
 }
 
+/**
+ * Start worker threads if not started yet, wait until all tasks
+ * finished, or a failure. Called by Run() and RunBackwards().
+ */
 void ThreadedRecurrentNetworkExecutor::_Exec() {
-  CAFFE_ENFORCE_EQ(false, failed_);
+  CAFFE_ENFORCE_EQ(
+      false, failed_, "Tried to execute a previously failed RNN executor");
 
   // Start threads if not started
   std::unique_lock<std::mutex> lk(countdown_mtx_);
   while (workers_.size() < num_threads_) {
-    VLOG(1) << "Start RNN worker " << workers_.size() << " / "
-              << num_threads_;
+    VLOG(1) << "Start RNN worker " << workers_.size() << " / " << num_threads_;
     workers_.push_back(
         std::thread(&ThreadedRecurrentNetworkExecutor::WorkerFunction, this));
   }
 
   // Wait until threads finish.
   Timer t;
-  cv_.wait_for(lk, std::chrono::seconds(30), [&] {
-    // Log if we are still running, so that we catch deadlocks.. there
-    // should not be any deadlocks, but...
-    if (t.Seconds() > 10) {
-      LOG(INFO) << "RNN Executor still running, remaining ops: " << countdown_;
-    }
-    return failed_ || countdown_ == 0;
-  });
+  while (!failed_ && countdown_ > 0) {
+    cv_.wait_for(lk, std::chrono::seconds(30), [&] {
+      // Log if we are still running, so that we catch deadlocks.. there
+      // should not be any deadlocks, but...
+      if (t.Seconds() > 10) {
+        LOG(INFO) << "RNN Executor still running, remaining ops: "
+                  << countdown_;
+      }
+      return failed_ || countdown_ == 0;
+    });
+  }
 
-  CAFFE_ENFORCE_EQ(false, failed_, "Recurrent network execution failed");
   CAFFE_ENFORCE_EQ(
-      0, countdown_, "Recurrent network execution did not finish in time");
-  CAFFE_ENFORCE_EQ(job_queue_.size(), 0);
+      false,
+      failed_,
+      "RNN executor encountered failure. See prior error logs for details.");
 }
 
 } // namespace caffe2

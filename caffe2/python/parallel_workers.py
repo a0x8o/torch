@@ -1,3 +1,18 @@
+# Copyright (c) 2016-present, Facebook, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##############################################################################
+
 # @package parallel_workers
 # Module caffe2.python.parallel_workers
 from __future__ import absolute_import
@@ -53,14 +68,16 @@ def init_workers(
     num_worker_threads=2,
     worker_name="train",
     init_fun=None,
-    external_loggers=None
+    external_loggers=None,
+    shutdown_fun=None,
 ):
     global global_coordinator
 
     metrics = Metrics(external_loggers)
 
     # Create coordinator object
-    coordinator = WorkerCoordinator(worker_name, init_fun)
+    coordinator = WorkerCoordinator(
+        worker_name, init_fun, shutdown_fun=shutdown_fun)
 
     # Launch fetch worker threads
     worker_ids = [
@@ -123,13 +140,14 @@ class State():
 
 
 class WorkerCoordinator(object):
-    def __init__(self, worker_name, init_fun, state=None):
+    def __init__(self, worker_name, init_fun, state=None, shutdown_fun=None):
         self._active = True
         self._started = False
         self._workers = []
         self._worker_name = worker_name
         self._init_fun = init_fun
         self._state = state
+        self._shutdown_fun = shutdown_fun
 
     def is_active(self):
         return self._active
@@ -154,6 +172,8 @@ class WorkerCoordinator(object):
         self._active = False
         if reason is not None:
             log.error("Data input failed due to an error: {}".format(reason))
+        if self._shutdown_fun and self._started:
+            self._shutdown_fun()
         if self._state:
             self._state.stop()
 

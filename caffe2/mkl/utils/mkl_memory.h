@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef CAFFE2_UTILS_MKL_MKL_MEMORY_H_
 #define CAFFE2_UTILS_MKL_MKL_MEMORY_H_
 
@@ -172,8 +188,10 @@ class MKLMemory {
       bool share_mem_if_possible = false) {
     buffer_.reset();
     dims_.resize(dimension);
+    size_ = 1;
     for (int i = 0; i < dimension; ++i) {
       dims_[i] = size[dimension - 1 - i];
+      size_ *= dims_[i];
     }
     user_layout_.Reset(dimension, size, strides);
     if (primitive) {
@@ -203,8 +221,10 @@ class MKLMemory {
       bool share_mem_if_possible = false) {
     buffer_.reset();
     dims_.resize(dims.size());
+    size_ = 1;
     for (int i = 0; i < dims.size(); ++i) {
       dims_[i] = dims[i];
+      size_ *= dims_[i];
     }
     size_t dimension = dims.size();
     vector<size_t> size(dimension);
@@ -238,6 +258,8 @@ class MKLMemory {
     if (share_mem_if_possible_ && layout_is_user_layout_) {
       VLOG(2) << "Sharing underlying memory and skip copy.";
       buffer_.reset(const_cast<void*>(ptr), [](void*) -> void {});
+    } else if (size_ == 0) {
+      VLOG(2) << "Cannot copy into empty MKL buffer.";
     } else {
       VLOG(2) << "Copying external content.";
       MKLDNN_SAFE_CALL(dnnConversionExecute<T>(
@@ -254,13 +276,20 @@ class MKLMemory {
   }
 
   void CopyFrom(const MKLMemory<T>& other) {
-    if (share_mem_if_possible_ && dnnLayoutCompare(other.layout_, layout_)) {
+    CAFFE_ENFORCE_EQ(
+        other.dims(),
+        dims_,
+        "Dims does not match the expected dims of the resource.");
+
+    if (share_mem_if_possible_ && dnnLayoutCompare<T>(other.layout_, layout_)) {
       buffer_ = other.buffer_;
+    } else if (size_ == 0) {
+      VLOG(2) << "Cannot copy between empty MKL buffers";
     } else {
       PrimitiveWrapper<T> convert(
           dnnConversionCreate<T>, other.layout_, layout_);
       MKLDNN_SAFE_CALL(
-          dnnConversionExecute<T>(convert, other.buffer_, buffer()));
+          dnnConversionExecute<T>(convert, other.buffer(), buffer()));
     }
   }
 
@@ -327,39 +356,45 @@ class MKLMemory {
       MKLMemory<T>* other,
       const dnnPrimitive_t primitive = nullptr,
       const dnnResourceType_t type = dnnResourceNumber) {
-    if (buffer_.get() == other->buffer_.get()) {
+    if (buffer_ && buffer_.get() == other->buffer_.get()) {
+      CAFFE_ENFORCE(
+          dnnLayoutCompare<T>(other->layout_, layout_),
+          "MKLMemory layout does not match, despite in-place buffers");
+      CAFFE_ENFORCE(
+          other->dims() == dims(),
+          "MKLMemory dimensions do not match, despite in-place buffers");
       VLOG(2) << "CopyTo does not need actual copying, as we are sharing "
                  "memory with the output.";
       // This is already mapping to the same memory region. Skip copy.
       return;
     }
-    CAFFE_ENFORCE(
-        buffer_.get(), "Canot copy out from an uninitialized MKLMemory.");
     // TODO(jiayq): if primitive creation is a big overhead and we will be
     // consistently copying stuff with fixed src and dst layouts, consider
     // making a cache for the primitive below.
     VLOG(2) << "CopyTo requires copying. Performing direct copy.";
+    if (dims() != other->dims()) {
+      other->Reset(dims(), primitive, type);
+    }
+    if (size_ == 0) {
+      VLOG(2) << "Cannot copy between empty MKL buffers.";
+      return;
+    }
+    CAFFE_ENFORCE(
+        buffer_.get(), "Cannot copy out from an uninitialized MKLMemory.");
     PrimitiveWrapper<T> convert(
         dnnConversionCreate<T>, layout_, other->layout_);
-    if (dnnPrimitive_t(convert) == nullptr ||
-        dnnConversionExecute<T>(convert, buffer_.get(), other->buffer()) !=
-            E_SUCCESS) {
-      VLOG(2) << "Direct copy failed, will need to allocate output.";
-      // If CopyTo directly did not succeed, it could be because the target
-      // MKLMemory is not having the right layout. In this case we will reset
-      // the target and then do another copy.
-      other->Reset(dims_, primitive, type);
-      PrimitiveWrapper<T> convert2(
-          dnnConversionCreate<T>, layout_, other->layout_);
-      MKLDNN_SAFE_CALL(
-          dnnConversionExecute<T>(convert2, buffer_.get(), other->buffer()));
-    }
+    MKLDNN_SAFE_CALL(
+        dnnConversionExecute<T>(convert, buffer_.get(), other->buffer()));
   }
 
   inline void* buffer() {
     if (buffer_ == nullptr) {
       CAFFE_ENFORCE(
           layout_ != nullptr, "Trying to allocate buffer but layout is empty.");
+      if (size_ == 0) {
+        VLOG(2) << "Cannot allocate empty MKL buffer.";
+        return buffer_.get();
+      }
       void* allocated = nullptr;
       MKLDNN_SAFE_CALL(dnnAllocateBuffer<T>(&allocated, layout_));
       buffer_.reset(allocated, [](void* ptr) -> void {
@@ -387,6 +422,13 @@ class MKLMemory {
   inline int dim32(const int i) const {
     CAFFE_ENFORCE_LT(dims_.at(i), std::numeric_limits<int>::max());
     return static_cast<int>(dims_[i]);
+  }
+
+  /**
+   * Returns the size (i.e., the number of items) in the buffer.
+   */
+  inline TIndex size() const {
+    return size_;
   }
 
   /**
@@ -457,6 +499,8 @@ class MKLMemory {
   // The dimensions in the same order as Caffe2 does. This is used to
   // interface with C2.
   vector<TIndex> dims_;
+  // Number of items in the buffer.
+  TIndex size_ = -1;
   // The user dnn layout.
   LayoutWrapper<T> user_layout_;
   // The internal dnn layout.
@@ -467,6 +511,24 @@ class MKLMemory {
   PrimitiveWrapper<T> convert_out_;
 
   DISABLE_COPY_AND_ASSIGN(MKLMemory);
+};
+
+template <typename T>
+class MKLWorkspace {
+ public:
+  MKLWorkspace(const LayoutWrapper<T>& layout) {
+    MKLDNN_SAFE_CALL(mkl::dnnAllocateBuffer<T>(&buffer_, layout));
+  }
+  ~MKLWorkspace() {
+    dnnReleaseBuffer<T>(buffer_);
+  }
+  T* buffer() {
+    return reinterpret_cast<T*>(buffer_);
+  }
+
+ private:
+  void* buffer_;
+  DISABLE_COPY_AND_ASSIGN(MKLWorkspace);
 };
 
 } // namespace mkl

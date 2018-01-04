@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "caffe2/core/operator.h"
 
 #include <algorithm>
@@ -6,11 +22,22 @@
 #include "caffe2/core/net.h"
 #include "caffe2/core/operator_gradient.h"
 #include "caffe2/core/tensor.h"
+#include "caffe2/core/types.h"
 #include "caffe2/core/workspace.h"
 
 #include "caffe2/proto/caffe2.pb.h"
 #include "caffe2/utils/proto_utils.h"
 #include "caffe2/utils/string_utils.h"
+
+CAFFE2_DEFINE_int(
+    caffe2_operator_max_engine_name_length,
+    10,
+    "Maximum engine name length to be stored");
+CAFFE2_DEFINE_bool(
+    caffe2_disable_implicit_engine_preference,
+    false,
+    "If set, disable implicit engine preferences. This is useful for unit "
+    "testing and debugging cases.");
 
 namespace caffe2 {
 
@@ -20,7 +47,7 @@ OperatorBase::OperatorBase(const OperatorDef& operator_def, Workspace* ws)
       device_option_(
           operator_def.has_device_option() ? operator_def.device_option()
                                            : DeviceOption()),
-      event_(device_option_) {
+      event_(caffe2::make_unique<Event>(device_option_)) {
   for (const string& input_str : operator_def.input()) {
     auto* blob = ws->GetBlob(input_str);
     CAFFE_ENFORCE(
@@ -38,8 +65,6 @@ OperatorBase::OperatorBase(const OperatorDef& operator_def, Workspace* ws)
     outputs_.push_back(CHECK_NOTNULL(ws->CreateBlob(output_str)));
   }
 }
-
-TensorShape GetTensorShapeOfBlob(const Blob* b);
 
 vector<TensorShape> OperatorBase::InputTensorShapes() {
   vector<TensorShape> tps;
@@ -113,24 +138,34 @@ unique_ptr<OperatorBase> _CreateOperator(
     const auto op_def_engines = split(',', operator_def.engine());
     engines.insert(engines.end(), op_def_engines.begin(), op_def_engines.end());
   }
-  if (g_per_op_engine_pref().count(device_type) &&
+  if (!FLAGS_caffe2_disable_implicit_engine_preference &&
+      g_per_op_engine_pref().count(device_type) &&
       g_per_op_engine_pref()[device_type].count(op_type)) {
     const auto& preferred_engines =
         g_per_op_engine_pref()[device_type][op_type];
+    VLOG(2) << "Inserting per-op engine preference: " << preferred_engines;
     engines.insert(
         engines.end(), preferred_engines.begin(), preferred_engines.end());
   }
-  if (g_global_engine_pref().count(device_type)) {
+  if (!FLAGS_caffe2_disable_implicit_engine_preference &&
+      g_global_engine_pref().count(device_type)) {
     const auto& preferred_engines = g_global_engine_pref()[device_type];
+    VLOG(2) << "Inserting global engine preference: " << preferred_engines;
     engines.insert(
         engines.end(), preferred_engines.begin(), preferred_engines.end());
   }
   for (const auto& engine : engines) {
-    const std::string key = op_type + "_ENGINE_" + engine;
+    const std::string key = OpRegistryKey(op_type, engine);
     VLOG(1) << "Trying to create operator " << op_type << " with engine "
             << engine;
     auto op = TryCreateOperator(key, operator_def, ws);
     if (op) {
+      if (engine.size() <= FLAGS_caffe2_operator_max_engine_name_length) {
+        op->annotate_engine(engine);
+      } else {
+        op->annotate_engine(
+            engine.substr(0, FLAGS_caffe2_operator_max_engine_name_length));
+      }
       return op;
     } else {
       // If the above fails, we will just return the normal case with the
@@ -157,6 +192,16 @@ unique_ptr<OperatorBase> _CreateOperator(
 }
 
 } // namespace
+
+const std::string OpRegistryKey(
+    const std::string& op_type,
+    const std::string& engine) {
+  if (engine == "" || engine == "DEFAULT") {
+    return op_type;
+  } else {
+    return op_type + "_ENGINE_" + engine;
+  }
+}
 
 void SetPerOpEnginePref(const PerOpEnginePrefType& per_op_engine_pref) {
   for (const auto& device_pref_pair : per_op_engine_pref) {
@@ -431,13 +476,20 @@ static TensorShapes InferBlobShapesAndTypes(
       }
 
       if (out.size() != op.output_size()) {
-        CAFFE_THROW(
-            "Invalid shape inference for operator ",
-            op.type(),
-            " Expected ",
-            op.output_size(),
-            " outputs, but got ",
-            out.size());
+        if (op.type() == "Slice") {
+          CAFFE_ENFORCE(
+              out.size() == 0,
+              "For Slice operator, either shape of all output blobs are "
+              "inferred or shape of none can be inferred.");
+        } else {
+          CAFFE_THROW(
+              "Invalid shape inference for operator ",
+              op.type(),
+              " Expected ",
+              op.output_size(),
+              " outputs, but got ",
+              out.size());
+        }
       } else {
         for (int i = 0; i < out.size(); i++) {
           blob_desc[op.output(i)] = out[i];
