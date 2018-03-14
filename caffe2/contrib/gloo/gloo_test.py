@@ -32,6 +32,7 @@ import shutil
 
 from caffe2.python import core, workspace, dyndep
 import caffe2.python.hypothesis_test_util as hu
+from gloo.python import IoError
 
 dyndep.InitOpsLibrary("@/caffe2/caffe2/distributed:file_store_handler_ops")
 dyndep.InitOpsLibrary("@/caffe2/caffe2/distributed:redis_store_handler_ops")
@@ -85,17 +86,17 @@ class TestCase(hu.HypothesisTestCase):
             while proc.is_alive():
                 proc.join(10)
 
-                # Raise exception if we find any. Otherwise each worker
-                # should put a True into the queue
-                # Note that the following is executed ALSO after
-                # the last process was joined, so if ANY exception
-                # was raised, it will be re-raised here.
-                self.assertFalse(queue.empty(), "Job failed without a result")
-                o = queue.get()
-                if isinstance(o, Exception):
-                    raise o
-                else:
-                    self.assertTrue(o)
+            # Raise exception if we find any. Otherwise each worker
+            # should put a True into the queue
+            # Note that the following is executed ALSO after
+            # the last process was joined, so if ANY exception
+            # was raised, it will be re-raised here.
+            self.assertFalse(queue.empty(), "Job failed without a result")
+            o = queue.get()
+            if isinstance(o, Exception):
+                raise o
+            else:
+                self.assertTrue(o)
 
     def run_test_distributed(self, fn, device_option=None, **kwargs):
         comm_rank = os.getenv('COMM_RANK')
@@ -361,6 +362,174 @@ class TestCase(hu.HypothesisTestCase):
                     tmpdir=tmpdir,
                     use_float16=use_float16)
 
+    def _test_reduce_scatter(self,
+                             comm_rank=None,
+                             comm_size=None,
+                             blob_size=None,
+                             num_blobs=None,
+                             tmpdir=None,
+                             use_float16=False
+                             ):
+        store_handler, common_world = self.create_common_world(
+            comm_rank=comm_rank,
+            comm_size=comm_size,
+            tmpdir=tmpdir)
+
+        blob_size = self.synchronize(
+            store_handler,
+            blob_size,
+            comm_rank=comm_rank)
+
+        num_blobs = self.synchronize(
+            store_handler,
+            num_blobs,
+            comm_rank=comm_rank)
+
+        blobs = []
+        for i in range(num_blobs):
+            blob = "blob_{}".format(i)
+            value = np.full(blob_size, (comm_rank * num_blobs) + i,
+                            np.float16 if use_float16 else np.float32)
+            workspace.FeedBlob(blob, value)
+            blobs.append(blob)
+
+        # Specify distribution among ranks i.e. number of elements
+        # scattered/distributed to each process.
+        recv_counts = np.zeros(comm_size, dtype=np.int32)
+        remaining = blob_size
+        chunk_size = (blob_size + comm_size - 1) / comm_size
+        for i in range(comm_size):
+            recv_counts[i] = min(chunk_size, remaining)
+            remaining = remaining - chunk_size if remaining > chunk_size else 0
+        recv_counts_blob = "recvCounts"
+        workspace.FeedBlob(recv_counts_blob, recv_counts)
+        blobs.append(recv_counts_blob)
+
+        net = core.Net("reduce_scatter")
+        net.ReduceScatter(
+            [common_world] + blobs,
+            blobs,
+            engine=op_engine)
+
+        workspace.CreateNet(net)
+        workspace.RunNet(net.Name())
+
+        for i in range(num_blobs):
+            np.testing.assert_array_equal(
+                np.resize(workspace.FetchBlob(blobs[i]), recv_counts[comm_rank]),
+                (num_blobs * comm_size) * (num_blobs * comm_size - 1) / 2)
+
+        # Run the net a few more times to check the operator
+        # works not just the first time it's called
+        for _tmp in range(4):
+            workspace.RunNet(net.Name())
+
+    @given(comm_size=st.integers(min_value=2, max_value=8),
+           blob_size=st.integers(min_value=1e3, max_value=1e6),
+           num_blobs=st.integers(min_value=1, max_value=4),
+           device_option=st.sampled_from([hu.cpu_do]),
+           use_float16=st.booleans())
+    def test_reduce_scatter(self, comm_size, blob_size, num_blobs,
+                            device_option, use_float16):
+        TestCase.test_counter += 1
+        if os.getenv('COMM_RANK') is not None:
+            self.run_test_distributed(
+                self._test_reduce_scatter,
+                blob_size=blob_size,
+                num_blobs=num_blobs,
+                use_float16=use_float16,
+                device_option=device_option)
+        else:
+            with TemporaryDirectory() as tmpdir:
+                self.run_test_locally(
+                    self._test_reduce_scatter,
+                    comm_size=comm_size,
+                    blob_size=blob_size,
+                    num_blobs=num_blobs,
+                    device_option=device_option,
+                    tmpdir=tmpdir,
+                    use_float16=use_float16)
+
+    def _test_allgather(self,
+                        comm_rank=None,
+                        comm_size=None,
+                        blob_size=None,
+                        num_blobs=None,
+                        tmpdir=None,
+                        use_float16=False
+                        ):
+        store_handler, common_world = self.create_common_world(
+            comm_rank=comm_rank,
+            comm_size=comm_size,
+            tmpdir=tmpdir)
+
+        blob_size = self.synchronize(
+            store_handler,
+            blob_size,
+            comm_rank=comm_rank)
+
+        num_blobs = self.synchronize(
+            store_handler,
+            num_blobs,
+            comm_rank=comm_rank)
+
+        blobs = []
+        for i in range(num_blobs):
+            blob = "blob_{}".format(i)
+            value = np.full(blob_size, (comm_rank * num_blobs) + i,
+                            np.float16 if use_float16 else np.float32)
+            workspace.FeedBlob(blob, value)
+            blobs.append(blob)
+
+        net = core.Net("allgather")
+        net.Allgather(
+            [common_world] + blobs,
+            ["Gathered"],
+            engine=op_engine)
+
+        workspace.CreateNet(net)
+        workspace.RunNet(net.Name())
+        # create expected output
+        expected_output = np.array([])
+        for i in range(comm_size):
+            for j in range(num_blobs):
+                value = np.full(blob_size, (i * num_blobs) + j,
+                                np.float16 if use_float16 else np.float32)
+                expected_output = np.concatenate((expected_output, value))
+        np.testing.assert_array_equal(
+            workspace.FetchBlob("Gathered"), expected_output)
+
+        # Run the net a few more times to check the operator
+        # works not just the first time it's called
+        for _tmp in range(4):
+            workspace.RunNet(net.Name())
+
+    @given(comm_size=st.integers(min_value=2, max_value=8),
+           blob_size=st.integers(min_value=1e3, max_value=1e6),
+           num_blobs=st.integers(min_value=1, max_value=4),
+           device_option=st.sampled_from([hu.cpu_do]),
+           use_float16=st.booleans())
+    def test_allgather(self, comm_size, blob_size, num_blobs, device_option,
+                       use_float16):
+        TestCase.test_counter += 1
+        if os.getenv('COMM_RANK') is not None:
+            self.run_test_distributed(
+                self._test_allgather,
+                blob_size=blob_size,
+                num_blobs=num_blobs,
+                use_float16=use_float16,
+                device_option=device_option)
+        else:
+            with TemporaryDirectory() as tmpdir:
+                self.run_test_locally(
+                    self._test_allgather,
+                    comm_size=comm_size,
+                    blob_size=blob_size,
+                    num_blobs=num_blobs,
+                    device_option=device_option,
+                    tmpdir=tmpdir,
+                    use_float16=use_float16)
+
     @given(device_option=st.sampled_from([hu.cpu_do]))
     def test_forked_cw(self, device_option):
         TestCase.test_counter += 1
@@ -469,6 +638,59 @@ class TestCase(hu.HypothesisTestCase):
                     tmpdir=tmpdir)
         # Check that test finishes quickly because connections get closed
         self.assertLess(time.time() - start_time, 2.0)
+
+    def _test_io_error(
+        self,
+        comm_rank=None,
+        comm_size=None,
+        tmpdir=None,
+    ):
+        '''
+        Only one node will participate in allreduce, resulting in an IoError
+        '''
+        store_handler, common_world = self.create_common_world(
+            comm_rank=comm_rank,
+            comm_size=comm_size,
+            tmpdir=tmpdir)
+
+        if comm_rank == 0:
+            blob_size = 1000
+            num_blobs = 1
+
+            blobs = []
+            for i in range(num_blobs):
+                blob = "blob_{}".format(i)
+                value = np.full(
+                    blob_size, (comm_rank * num_blobs) + i, np.float32
+                )
+                workspace.FeedBlob(blob, value)
+                blobs.append(blob)
+
+            net = core.Net("allreduce")
+            net.Allreduce(
+                [common_world] + blobs,
+                blobs,
+                engine=op_engine)
+
+            workspace.CreateNet(net)
+            workspace.RunNet(net.Name())
+
+    @given(comm_size=st.integers(min_value=2, max_value=8),
+           device_option=st.sampled_from([hu.cpu_do]))
+    def test_io_error(self, comm_size, device_option):
+        TestCase.test_counter += 1
+        with self.assertRaises(IoError):
+            if os.getenv('COMM_RANK') is not None:
+                self.run_test_distributed(
+                    self._test_io_error,
+                    device_option=device_option)
+            else:
+                with TemporaryDirectory() as tmpdir:
+                    self.run_test_locally(
+                        self._test_io_error,
+                        comm_size=comm_size,
+                        device_option=device_option,
+                        tmpdir=tmpdir)
 
 if __name__ == "__main__":
     import unittest

@@ -62,35 +62,44 @@ bool SpatialBNOp<CPUContext>::RunOnDevice() {
     EigenVectorArrayMap<float> var(
         Output(SAVED_INV_VAR)->mutable_data<float>(), C);
 
-    mean.setZero();
-    var.setZero();
-    switch (order_) {
-      case StorageOrder::NCHW: {
-        ConstEigenArrayMap<float> X_arr(X.data<float>(), sample_size, N * C);
-        for (int nc = 0; nc < N * C; ++nc) {
-          mean(nc % C) += X_arr.col(nc).sum();
+    if (num_batches_ > 1) {
+      ConstEigenVectorArrayMap<float> sums(Input(SUMS).data<float>(), C);
+      ConstEigenVectorArrayMap<float> sumsq(Input(SUMSQ).data<float>(), C);
+      const auto multi_batch_size = N * num_batches_ * sample_size;
+      mean = sums / multi_batch_size;
+      var = (sumsq - (sums * sums) / multi_batch_size) / multi_batch_size;
+    } else {
+      mean.setZero();
+      var.setZero();
+      switch (order_) {
+        case StorageOrder::NCHW: {
+          ConstEigenArrayMap<float> X_arr(X.data<float>(), sample_size, N * C);
+          for (int nc = 0; nc < N * C; ++nc) {
+            mean(nc % C) += X_arr.col(nc).sum();
+          }
+          mean /= N * sample_size;
+          for (int nc = 0; nc < N * C; ++nc) {
+            var(nc % C) +=
+                (X_arr.col(nc) - mean(nc % C)).matrix().squaredNorm();
+          }
+          var /= N * sample_size;
+          break;
         }
-        mean /= N * sample_size;
-        for (int nc = 0; nc < N * C; ++nc) {
-          var(nc % C) += (X_arr.col(nc) - mean(nc % C)).matrix().squaredNorm();
+        case StorageOrder::NHWC: {
+          ConstEigenArrayMap<float> X_arr(X.data<float>(), C, N * sample_size);
+          for (int i = 0; i < N * sample_size; ++i) {
+            mean += X_arr.col(i);
+          }
+          mean /= N * sample_size;
+          for (int i = 0; i < N * sample_size; ++i) {
+            var += (X_arr.col(i) - mean) * (X_arr.col(i) - mean);
+          }
+          var /= N * sample_size;
+          break;
         }
-        var /= N * sample_size;
-        break;
+        default:
+          CAFFE_THROW("Unknown storage order: ", order_);
       }
-      case StorageOrder::NHWC: {
-        ConstEigenArrayMap<float> X_arr(X.data<float>(), C, N * sample_size);
-        for (int i = 0; i < N * sample_size; ++i) {
-          mean += X_arr.col(i);
-        }
-        mean /= N * sample_size;
-        for (int i = 0; i < N * sample_size; ++i) {
-          var += (X_arr.col(i) - mean) * (X_arr.col(i) - mean);
-        }
-        var /= N * sample_size;
-        break;
-      }
-      default:
-        CAFFE_THROW("Unknown storage order: ", order_);
     }
 
     // Compute the running mean and running inv variance.
@@ -166,13 +175,29 @@ bool SpatialBNOp<CPUContext>::RunOnDevice() {
   return true;
 }
 
+namespace {
+OpSchema::Cost CostInferenceForSpatialBN(
+    const OperatorDef& def,
+    const vector<TensorShape>& in) {
+  struct OpSchema::Cost cost = PointwiseCostInference<4>(def, in);
+  ArgumentHelper helper(def);
+  auto order =
+      StringToStorageOrder(helper.GetSingleArgument<string>("order", "NCHW"));
+  const TensorShape X = in[0];
+  const int C =
+      (order == StorageOrder::NCHW ? X.dims(1) : X.dims(X.dims_size() - 1));
+  cost.params_bytes = 2 * C * sizeof(float);
+  return cost;
+}
+} // namespace
 
 REGISTER_CPU_OPERATOR(SpatialBN, SpatialBNOp<CPUContext>);
 
 OPERATOR_SCHEMA(SpatialBN)
-    .NumInputs(5)
+    .NumInputs({5, 7})
     .NumOutputs({1, 5})
     .AllowInplace({{0, 0}})
+    .CostInferenceFunction(CostInferenceForSpatialBN)
     .EnforceInplace({{3, 1}, {4, 2}})
     .TensorInferenceFunction(
         [](const OperatorDef& def, const vector<TensorShape>& in) {
@@ -205,9 +230,13 @@ Carries out spatial batch normalization as described in the paper
 https://arxiv.org/abs/1502.03167 . Depending on the mode it is being run,
 there are multiple cases for the number of outputs, which we list below:
 
-Output case #1: Y, mean, var, saved_mean, saved_var
-                (training mode)
-Output case #2: Y (test mode)
+
+Output case #1:
+  Y, mean, var, saved_mean, saved_var (training mode)
+
+
+Output case #2:
+  Y (test mode)
 )DOC")
     .ArgIsTest(
         "If set to nonzero, run spatial batch normalization in test mode.")
@@ -217,6 +246,12 @@ Output case #2: Y (test mode)
         "momentum",
         "Factor used in computing the running mean and variance."
         "e.g., running_mean = running_mean * momentum + mean * (1 - momentum)")
+    .Arg(
+        "num_batches",
+        "(Optional) Specifies the number of batches to apply normalization on. "
+        "Requires specifying the optional sums and sumsq inputs that provide "
+        "statistics across multiple batches from which mean and variance can "
+        "be determined.")
     .Input(
         0,
         "X",
@@ -242,6 +277,17 @@ Output case #2: Y (test mode)
         "var",
         "The running variance (training) or the estimated "
         "variance (testing) as a 1-dimensional tensor of size C.")
+    .Input(
+        5,
+        "sums",
+        "(optional) Per-channel sums of elements to be used to determine the "
+        "mean and variance for this batch")
+    .Input(
+        6,
+        "sumsq",
+        "(optional) Per-channel sum of elements squared per channel to be used "
+        "to determine the variance for this batch")
+
     .Output(0, "Y", "The output 4-dimensional tensor of the same shape as X.")
     .Output(
         1,

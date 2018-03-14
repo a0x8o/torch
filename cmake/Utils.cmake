@@ -113,88 +113,6 @@ function(caffe_parse_header_single_define LIBNAME HDR_PATH VARNAME)
   endif()
 endfunction()
 
-########################################################################################################
-# An option that the user can select. Can accept condition to control when option is available for user.
-# Usage:
-#   caffe_option(<option_variable> "doc string" <initial value or boolean expression> [IF <condition>])
-function(caffe_option variable description value)
-  set(__value ${value})
-  set(__condition "")
-  set(__varname "__value")
-  foreach(arg ${ARGN})
-    if(arg STREQUAL "IF" OR arg STREQUAL "if")
-      set(__varname "__condition")
-    else()
-      list(APPEND ${__varname} ${arg})
-    endif()
-  endforeach()
-  unset(__varname)
-  if("${__condition}" STREQUAL "")
-    set(__condition 2 GREATER 1)
-  endif()
-
-  if(${__condition})
-    if("${__value}" MATCHES ";")
-      if(${__value})
-        option(${variable} "${description}" ON)
-      else()
-        option(${variable} "${description}" OFF)
-      endif()
-    elseif(DEFINED ${__value})
-      if(${__value})
-        option(${variable} "${description}" ON)
-      else()
-        option(${variable} "${description}" OFF)
-      endif()
-    else()
-      option(${variable} "${description}" ${__value})
-    endif()
-  else()
-    unset(${variable} CACHE)
-  endif()
-endfunction()
-
-##############################################################################
-# Helper function to add as-needed flag around a library.
-function(caffe_add_as_needed_flag lib output_var)
-  if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
-    # TODO: Clang seems to not need this flag. Double check.
-    set(${output_var} ${lib} PARENT_SCOPE)
-  elseif(MSVC)
-    # TODO: check what is the behavior of MSVC.
-    # In MSVC, we will add whole archive in default.
-    set(${output_var} ${lib} PARENT_SCOPE)
-  else()
-    # Assume everything else is like gcc: we will need as-needed flag.
-    set(${output_var} -Wl,--no-as-needed ${lib} -Wl,--as-needed PARENT_SCOPE)
-  endif()
-endfunction()
-
-##############################################################################
-# Helper function to add whole_archive flag around a library.
-function(caffe_add_whole_archive_flag lib output_var)
-  if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
-    set(${output_var} -Wl,-force_load,$<TARGET_FILE:${lib}> PARENT_SCOPE)
-  elseif(MSVC)
-    # In MSVC, we will add whole archive in default.
-    set(${output_var} -WHOLEARCHIVE:$<TARGET_FILE:${lib}> PARENT_SCOPE)
-  else()
-    # Assume everything else is like gcc
-    set(${output_var} -Wl,--whole-archive ${lib} -Wl,--no-whole-archive PARENT_SCOPE)
-  endif()
-endfunction()
-
-##############################################################################
-# Helper function to add either as-needed, or whole_archive flag around a library.
-function(caffe_add_linker_flag lib output_var)
-  if (BUILD_SHARED_LIBS)
-    caffe_add_as_needed_flag(${lib} tmp)
-  else()
-    caffe_add_whole_archive_flag(${lib} tmp)
-  endif()
-  set(${output_var} ${tmp} PARENT_SCOPE)
-endfunction()
-
 ##############################################################################
 # Helper function to automatically generate __init__.py files where python
 # sources reside but there are no __init__.py present.
@@ -226,48 +144,76 @@ function(caffe_autogen_init_py_files)
   endforeach()
 endfunction()
 
-##############################################################################
-# Creating a Caffe2 binary target with sources specified with relative path.
-# Usage:
-#   caffe2_binary_target(target_name_or_src <src1> [<src2>] [<src3>] ...)
-# If only target_name_or_src is specified, this target is build with one single
-# source file and the target name is autogen from the filename. Otherwise, the
-# target name is given by the first argument and the rest are the source files
-# to build the target.
-function(caffe2_binary_target target_name_or_src)
-  if (${ARGN})
-    set(__target ${target_name_or_src})
-    prepend(__srcs "${CMAKE_CURRENT_SOURCE_DIR}/" "${ARGN}")
+###
+# Removes common indentation from a block of text to produce code suitable for
+# setting to `python -c`, or using with pycmd. This allows multiline code to be
+# nested nicely in the surrounding code structure.
+#
+# This function respsects PYTHON_EXECUTABLE if it defined, otherwise it uses
+# `python` and hopes for the best. An error will be thrown if it is not found.
+#
+# Args:
+#     outvar : variable that will hold the stdout of the python command
+#     text   : text to remove indentation from
+#
+function(dedent outvar text)
+  # Use PYTHON_EXECUTABLE if it is defined, otherwise default to python
+  if ("${PYTHON_EXECUTABLE}" STREQUAL "")
+    set(_python_exe "python")
   else()
-    get_filename_component(__target ${target_name_or_src} NAME_WE)
-    prepend(__srcs "${CMAKE_CURRENT_SOURCE_DIR}/" "${target_name_or_src}")
+    set(_python_exe "${PYTHON_EXECUTABLE}")
   endif()
-  add_executable(${__target} ${__srcs})
-  add_dependencies(${__target} ${Caffe2_MAIN_LIBS_ORDER})
-  target_link_libraries(${__target} ${Caffe2_MAIN_LIBS} ${Caffe2_DEPENDENCY_LIBS})
-  install(TARGETS ${__target} DESTINATION bin)
+  set(_fixup_cmd "import sys; from textwrap import dedent; print(dedent(sys.stdin.read()))")
+  # Use echo to pipe the text to python's stdinput. This prevents us from
+  # needing to worry about any sort of special escaping.
+  execute_process(
+    COMMAND echo "${text}"
+    COMMAND "${_python_exe}" -c "${_fixup_cmd}"
+    RESULT_VARIABLE _dedent_exitcode
+    OUTPUT_VARIABLE _dedent_text)
+  if(NOT ${_dedent_exitcode} EQUAL 0)
+    message(ERROR " Failed to remove indentation from: \n\"\"\"\n${text}\n\"\"\"
+    Python dedent failed with error code: ${_dedent_exitcode}")
+    message(FATAL_ERROR " Python dedent failed with error code: ${_dedent_exitcode}")
+  endif()
+  # Remove supurflous newlines (artifacts of print)
+  string(STRIP "${_dedent_text}" _dedent_text)
+  set(${outvar} "${_dedent_text}" PARENT_SCOPE)
 endfunction()
 
-##############################################################################
-# Helper function to add paths to system include directories.
+
+###
+# Helper function to run `python -c "<cmd>"` and capture the results of stdout
 #
-# Anaconda distributions typically contain a lot of packages and some
-# of those can conflict with headers/libraries that must be sourced
-# from elsewhere. This helper ensures that Anaconda paths are always
-# added AFTER other include paths, such that it does not accidentally
-# takes precedence when it shouldn't.
+# Runs a python command and populates an outvar with the result of stdout.
+# Common indentation in the text of `cmd` is removed before the command is
+# executed, so the caller does not need to worry about indentation issues.
 #
-# This is just a heuristic and does not have any guarantees. We can
-# add other corner cases here (as long as they are generic enough).
-# A complete include path cross checker is a final resort if this
-# hacky approach proves insufficient.
+# This function respsects PYTHON_EXECUTABLE if it defined, otherwise it uses
+# `python` and hopes for the best. An error will be thrown if it is not found.
 #
-function(caffe2_include_directories)
-  foreach(path IN LISTS ARGN)
-    if (${path} MATCHES "/anaconda")
-      include_directories(AFTER SYSTEM ${path})
-    else()
-      include_directories(BEFORE SYSTEM ${path})
-    endif()
-  endforeach()
+# Args:
+#     outvar : variable that will hold the stdout of the python command
+#     cmd    : text representing a (possibly multiline) block of python code
+#
+function(pycmd outvar cmd)
+  dedent(_dedent_cmd "${cmd}")
+  # Use PYTHON_EXECUTABLE if it is defined, otherwise default to python
+  if ("${PYTHON_EXECUTABLE}" STREQUAL "")
+    set(_python_exe "python")
+  else()
+    set(_python_exe "${PYTHON_EXECUTABLE}")
+  endif()
+  # run the actual command
+  execute_process(
+    COMMAND "${_python_exe}" -c "${_dedent_cmd}"
+    RESULT_VARIABLE _exitcode
+    OUTPUT_VARIABLE _output)
+  if(NOT ${_exitcode} EQUAL 0)
+    message(ERROR " Failed when running python code: \"\"\"\n${_dedent_cmd}\n\"\"\"")
+    message(FATAL_ERROR " Python command failed with error code: ${_exitcode}")
+  endif()
+  # Remove supurflous newlines (artifacts of print)
+  string(STRIP "${_output}" _output)
+  set(${outvar} "${_output}" PARENT_SCOPE)
 endfunction()

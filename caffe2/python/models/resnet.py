@@ -292,6 +292,7 @@ def create_resnet50(
         'final_avg',
         kernel=final_avg_kernel,
         stride=1,
+        global_pooling=True,
     )
 
     # Final dimension of the "image" is reduced to 7x7
@@ -334,7 +335,7 @@ def create_resnet_32x32(
     # Number of blocks as described in sec 4.2
     filters = [16, 32, 64]
 
-    builder = ResNetBuilder(model, 'relu1', is_test=is_test)
+    builder = ResNetBuilder(model, 'relu1', no_bias=0, is_test=is_test)
     prev_filters = 16
     for groupidx in range(0, 3):
         for blockidx in range(0, 2 * num_groups):

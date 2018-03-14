@@ -32,10 +32,14 @@ def tanh(x):
     return 2.0 * sigmoid(2.0 * x) - 1
 
 
-def _prepare_rnn(t, n, dim_in, create_rnn, outputs_with_grads,
-                  forget_bias, memory_optim=False,
-                  forward_only=False, drop_states=False, T=None,
-                  two_d_initial_states=None, dim_out=None):
+def _prepare_rnn(
+    t, n, dim_in, create_rnn, outputs_with_grads,
+    forget_bias, memory_optim=False,
+    forward_only=False, drop_states=False, T=None,
+    two_d_initial_states=None, dim_out=None,
+    num_states=2,
+    **kwargs
+):
     if dim_out is None:
         dim_out = [dim_in]
     print("Dims: ", t, n, dim_in, dim_out)
@@ -53,13 +57,11 @@ def _prepare_rnn(t, n, dim_in, create_rnn, outputs_with_grads,
 
     states = []
     for layer_id, d in enumerate(dim_out):
-        h, c = model.net.AddExternalInputs(
-            "hidden_init_{}".format(layer_id),
-            "cell_init_{}".format(layer_id),
-        )
-        states.extend([h, c])
-        workspace.FeedBlob(h, generate_input_state(n, d).astype(np.float32))
-        workspace.FeedBlob(c, generate_input_state(n, d).astype(np.float32))
+        for i in range(num_states):
+            state_name = "state_{}/layer_{}".format(i, layer_id)
+            states.append(model.net.AddExternalInput(state_name))
+            workspace.FeedBlob(
+                states[-1], generate_input_state(n, d).astype(np.float32))
 
     # Due to convoluted RNN scoping logic we make sure that things
     # work from a namescope
@@ -76,6 +78,7 @@ def _prepare_rnn(t, n, dim_in, create_rnn, outputs_with_grads,
             forward_only=forward_only,
             drop_states=drop_states,
             static_rnn_unroll_size=T,
+            **kwargs
         )
 
     workspace.RunNetOnce(model.param_init_net)

@@ -41,7 +41,7 @@ def get_key(record):
     elif schema.equal_schemas(record, IdScoreList, check_field_types=False):
         key = 'values:keys'
     else:
-        raise NotImplementedError()
+        raise NotImplementedError('Not implemented for {}'.format(record))
     assert record[key].metadata is not None, (
         "Blob {} doesn't have metadata".format(str(record[key]())))
     return record[key]
@@ -134,7 +134,7 @@ LayerPsParam = namedtuple('LayerPsParam', ['sparse_key', 'average_length'])
 class LayerParameter(object):
 
     def __init__(self, parameter=None, optimizer=None, initializer=None,
-                 ps_param=None):
+                 ps_param=None, regularizer=None):
         assert isinstance(parameter, core.BlobReference), \
             "expect {0} to be a blob reference".format(str(parameter))
         # need to put the following line (shape) before initialier
@@ -144,6 +144,7 @@ class LayerParameter(object):
         self.optimizer = optimizer
         self.initializer = initializer
         self.ps_param = ps_param
+        self.regularizer = regularizer
 
     @property
     def initializer(self):
@@ -256,6 +257,8 @@ class ModelLayer(object):
         self.tags = set(tags or [])
         self.tags.update(TagContext.current().tags)
         self.params = []
+        self._export_output_for_metrics = False
+        self._export_params_for_metrics = False
 
     def get_type(self):
         return self.__class__.__name__
@@ -331,13 +334,14 @@ class ModelLayer(object):
                 init_net._net.op.extend([init_op])
 
     def create_param(self, param_name, shape, initializer, optimizer,
-                     ps_param=None):
+                     ps_param=None, regularizer=None):
         with scope.NameScope(self.name, reset=True):
             param = self.model.create_param(param_name=param_name,
                                             shape=shape,
                                             initializer=initializer,
                                             optimizer=optimizer,
-                                            ps_param=ps_param)
+                                            ps_param=ps_param,
+                                            regularizer=regularizer)
 
             # make sure we don't share parameters in the same layer
             assert all(param.parameter != p.parameter for p in self.params)
@@ -374,6 +378,11 @@ class ModelLayer(object):
             else:
                 self.add_ops(net)
 
+            if context in {InstantiationContext.TRAINING,
+                           InstantiationContext.EVAL} \
+               and self._export_params_for_metrics:
+                self.add_param_copy_operators(net)
+
     def add_ops(self, net):
         # Predict layer implementation.
         raise NotImplementedError
@@ -394,3 +403,24 @@ class ModelLayer(object):
         # purpose. Default layer implementation is completely matching eval
         # layer implementation.
         self.add_eval_ops(net)
+
+    def add_param_copy_operators(self, net):
+        for param in self.params:
+            param_copy_ref = self.model.metrics_schema[str(param.parameter)]
+            net.Copy([param.parameter], param_copy_ref.field_blobs())
+
+    def export_output_for_metrics(self):
+        self._export_output_for_metrics = True
+
+        # Export output of the layer directly
+        export_name = self.name + "/output"
+        self.model.add_metric_field(export_name, self.output_schema)
+
+    def export_params_for_metrics(self):
+        self._export_params_for_metrics = True
+
+        # Export copies of parameters
+        for param in self.params:
+            param_copy_ref = self.get_next_blob_reference(
+                str(param).split("/")[-1] + "_copy")
+            self.model.add_metric_field(str(param.parameter), param_copy_ref)

@@ -259,6 +259,12 @@ class TestCreateOperator(test_util.TestCase):
 
 
 class TestAutoNaming(test_util.TestCase):
+    def assertOperatorListEqual(self, operatorDefList1, operatorDefList2):
+        for op in operatorDefList1:
+            op.debug_info = ""
+        for op in operatorDefList2:
+            op.debug_info = ""
+        self.assertEqual(operatorDefList1, operatorDefList2)
     """
     Test that operators are named with different names, and that automatically
     named blob names don't clash intra or inter networks.
@@ -275,7 +281,7 @@ class TestAutoNaming(test_util.TestCase):
         net_a = create_net()
         net_b = create_net()
         # created net proto is predicatable.
-        self.assertEqual(net_a.Proto().op,
+        self.assertOperatorListEqual(net_a.Proto().op,
                          net_b.Proto().op)
         self.assertEqual(net_a.Proto().op[0].output[0], 'foo/ab')
         self.assertEqual(net_a.Proto().op[1].output[0], 'cd')
@@ -406,54 +412,71 @@ class TestExtractPredictorNet(test_util.TestCase):
 
 
 class TestOperatorTraceback(test_util.TestCase):
+    def op_name_check(self, net, cf, line, func):
+        net.PopulateProtoWithFileName()
+        filename = getframeinfo(cf).filename
+        self.assertEqual(net.Proto().op[0].name, '{}:{}:{}'.format(
+            filename, line, func))
+
     def test_operator_constructor_traceback(self):
         net = core.Net("test")
         a, b = net.AddExternalInput("a", "b")
         net.Mul([a, b], "c"); cf = currentframe(); line = cf.f_lineno
+        func = cf.f_code.co_name
         with self.assertRaises(Exception):
             workspace.RunNetOnce(net)
         with self.assertRaises(Exception):
             workspace.CreateNet(net)
-        self.op_name_check(net, cf, line)
-
-    def op_name_check(self, net, cf, line):
-        net.PopulateProtoWithFileName()
-        filename = getframeinfo(cf).filename
-        self.assertEqual(net.Proto().op[0].name, '{}:{}'.format(filename, line))
+        self.op_name_check(net, cf, line, func)
 
     def test_operator_runtime_traceback(self):
         net = core.Net("test")
         a = net.AddExternalInput("a")
         workspace.blobs[a] = np.array([1, 2, 3], dtype=np.float32)
         net.Split(a, ["b", "c"], axis=0); cf = currentframe(); line = cf.f_lineno
+        func = cf.f_code.co_name
         with self.assertRaises(Exception):
             workspace.RunNetOnce(net)
         workspace.CreateNet(net)
         with self.assertRaises(Exception):
             workspace.RunNet(net)
-        self.op_name_check(net, cf, line)
+        self.op_name_check(net, cf, line, func)
 
     def test_c_workspace_constructor(self):
         net = core.Net("test")
         a, b = net.AddExternalInput("a", "b")
         net.Mul([a, b], "c"); cf = currentframe(); line = cf.f_lineno
+        func = cf.f_code.co_name
         ws = workspace.C.Workspace()
         with self.assertRaises(Exception):
             ws.run(net)
         with self.assertRaises(Exception):
             ws.create_net(net)
-        self.op_name_check(net, cf, line)
+        self.op_name_check(net, cf, line, func)
 
     def test_c_workspace_runtime(self):
         net = core.Net("test")
         a = net.AddExternalInput("a")
         net.Split(a, ["b", "c"], axis=0); cf = currentframe(); line = cf.f_lineno
+        func = cf.f_code.co_name
         ws = workspace.C.Workspace()
         ws.create_blob(str(a)).feed(np.array([1, 2, 3], dtype=np.float32))
         ws.create_net(net)
         with self.assertRaises(Exception):
             ws.run(net)
-        self.op_name_check(net, cf, line)
+        self.op_name_check(net, cf, line, func)
+
+    def test_async_exception_handling(self):
+        net = core.Net("test")
+        net.Proto().type = 'dag'  # this runs operators on background threads
+        a = net.AddExternalInput("a")
+        net.Split(a, ["b", "c"], axis=0); cf = currentframe(); line = cf.f_lineno
+        func = cf.f_code.co_name
+        workspace.FeedBlob(a, np.array([1, 2, 3], dtype=np.float32))
+        with self.assertRaises(Exception) as enforceNotMet:
+            workspace.RunNetOnce(net)
+        self.assertIn('enforce fail', str(enforceNotMet.exception))
+        self.op_name_check(net, cf, line, func)
 
 
 class TestCreatePlan(test_util.TestCase):

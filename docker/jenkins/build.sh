@@ -1,33 +1,6 @@
 #!/bin/bash
 
-set -e
-
-declare -a valid_images
-valid_images=(
-  # Primary builds
-  py2-cuda8.0-cudnn7-ubuntu16.04
-  py3-cuda8.0-cudnn7-ubuntu16.04
-  py2-cuda9.0-cudnn7-ubuntu16.04
-  py3-cuda9.0-cudnn7-ubuntu16.04
-  py2-mkl-ubuntu16.04
-  py3-mkl-ubuntu16.04
-
-  # Compiler compatibility
-  py2-gcc5-ubuntu16.04
-  py2-gcc6-ubuntu16.04
-  py2-gcc7-ubuntu16.04
-  py2-clang3.8-ubuntu16.04
-  py2-clang3.9-ubuntu16.04
-
-  # Build for Android
-  py2-android-ubuntu16.04
-
-  # Builds for Anaconda
-  py2-conda-ubuntu16.04
-  py2-conda-cuda9.0-cudnn7-ubuntu16.04
-  py3-conda-ubuntu16.04
-  py3-conda-cuda9.0-cudnn7-ubuntu16.04
-)
+set -ex
 
 image="$1"
 shift
@@ -51,7 +24,9 @@ else
   exit 1
 fi
 
-PYTHON_VERSION="$(echo "${image}" | perl -n -e'/py(\d+(\.\d+)?)/ && print $1')"
+if [[ "$image" == py* ]]; then
+  PYTHON_VERSION="$(echo "${image}" | perl -n -e'/py(\d+(\.\d+)?)/ && print $1')"
+fi
 
 if [[ "$image" == *cuda* ]]; then
   CUDA_VERSION="$(echo "${image}" | perl -n -e'/cuda(\d+\.\d+)/ && print $1')"
@@ -60,7 +35,8 @@ if [[ "$image" == *cuda* ]]; then
 fi
 
 if [[ "$image" == *conda* ]]; then
-  ANACONDA_VERSION=$PYTHON_VERSION
+  # Unlike python version, Anaconda version is either 2 or 3
+  ANACONDA_VERSION="$(echo "${image}" | perl -n -e'/conda(\d)/ && print $1')"
 fi
 
 if [[ "$image" == *-mkl-* ]]; then
@@ -69,6 +45,10 @@ fi
 
 if [[ "$image" == *-android-* ]]; then
   ANDROID=yes
+
+  # The Android NDK requires CMake 3.6 or higher.
+  # See https://github.com/caffe2/caffe2/pull/1740 for more info.
+  CMAKE_VERSION=3.6.3
 fi
 
 if [[ "$image" == *-gcc* ]]; then
@@ -105,5 +85,6 @@ docker build \
        --build-arg "ANDROID=${ANDROID}" \
        --build-arg "GCC_VERSION=${GCC_VERSION}" \
        --build-arg "CLANG_VERSION=${CLANG_VERSION}" \
+       --build-arg "CMAKE_VERSION=${CMAKE_VERSION:-}" \
        "$@" \
        "$(dirname ${DOCKERFILE})"

@@ -198,6 +198,19 @@ void Maximum(
     T* y,
     Context* context);
 
+// Transpose tensor X with x_dims by axes and write the result to tensor Y with
+// y_dims.
+template <typename T, class Context>
+void Transpose(
+    const int num_axes,
+    const int* x_dims,
+    const int* y_dims,
+    const int* axes,
+    const int data_size,
+    const T* X,
+    T* Y,
+    Context* context);
+
 // Decaf gemm provides a simpler interface to the gemm functions, with the
 // limitation that the data has to be contiguous in memory.
 template <typename T, class Context, class Engine = DefaultEngine>

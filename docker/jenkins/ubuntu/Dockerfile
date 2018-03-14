@@ -3,6 +3,7 @@ FROM ubuntu:${UBUNTU_VERSION}
 
 # Install required packages to build Caffe2
 ARG EC2
+ARG UBUNTU_VERSION
 ADD ./install_base.sh install_base.sh
 RUN bash ./install_base.sh && rm install_base.sh
 
@@ -13,7 +14,8 @@ RUN bash ./install_ccache.sh && rm install_ccache.sh
 # Install Python
 ARG PYTHON_VERSION
 ADD ./install_python.sh install_python.sh
-RUN bash ./install_python.sh && rm install_python.sh
+RUN if [ -n "${PYTHON_VERSION}" ]; then bash ./install_python.sh; fi
+RUN rm install_python.sh
 
 # Install Anaconda
 ARG ANACONDA_VERSION
@@ -44,6 +46,12 @@ ARG CLANG_VERSION
 ADD ./install_clang.sh install_clang.sh
 RUN if [ -n "${CLANG_VERSION}" ]; then bash ./install_clang.sh; fi
 RUN rm install_clang.sh
+
+# (optional) Install non-default CMake version
+ARG CMAKE_VERSION
+ADD ./install_cmake.sh install_cmake.sh
+RUN if [ -n "${CMAKE_VERSION}" ]; then bash ./install_cmake.sh; fi
+RUN rm install_cmake.sh
 
 # (optional) Add Jenkins user
 ARG JENKINS

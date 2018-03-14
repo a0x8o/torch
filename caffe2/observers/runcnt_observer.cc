@@ -16,15 +16,16 @@ std::unique_ptr<ObserverBase<OperatorBase>> RunCountOperatorObserver::copy(
 }
 
 std::string RunCountNetObserver::debugInfo() {
+#if CAFFE2_ANDROID
+  // workaround
+  int foo = cnt_;
+  return "This operator runs " + caffe2::to_string(foo) + " times.";
+#else
   return "This operator runs " + caffe2::to_string(cnt_) + " times.";
+#endif
 }
 
-void RunCountNetObserver::Start() {
-  const auto& operators = subject_->GetOperators();
-  for (auto* op : operators) {
-    op->AttachObserver(caffe2::make_unique<RunCountOperatorObserver>(op, this));
-  }
-}
+void RunCountNetObserver::Start() {}
 
 void RunCountNetObserver::Stop() {}
 

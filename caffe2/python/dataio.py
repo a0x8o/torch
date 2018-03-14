@@ -226,9 +226,6 @@ class ReaderBuilder(object):
     def schema(self):
         raise NotImplementedError()
 
-    def enqueue_splits(self, net, split_queue):
-        raise NotImplementedError()
-
     def splits(self, net):
         raise NotImplementedError()
 
@@ -256,14 +253,19 @@ class PipedReaderBuilder(ReaderBuilder):
     def schema(self):
         return self._builder.schema()
 
-    def enqueue_splits(self, net, split_queue):
-        return self._builder.enqueue_splits(net, split_queue)
-
     def splits(self, net):
         return self._builder.splits(net)
 
-    def new_reader(self, split_reader=None, **kwargs):
-        output = self._piper(self._builder.new_reader(split_reader), **kwargs)
+    def new_reader(self, split_reader=None, init_group=None, pipe_group=None,
+                   **kwargs):
+        output = self._piper(
+            self._builder.new_reader(
+                split_reader,
+                init_group=init_group,
+                pipe_group=pipe_group
+            ),
+            **kwargs
+        )
         return output if isinstance(output, Reader) else output.reader()
 
 

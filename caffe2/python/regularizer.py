@@ -26,7 +26,7 @@ from caffe2.python import core
 
 class Regularizer(object):
     def __init__(self):
-        pass
+        self.apply_after_optimizer = False
 
     '''
     Adds regularization to train_net for given parameter. Its factor ahead of
@@ -34,11 +34,11 @@ class Regularizer(object):
     The param should be a BlobReference.
     '''
 
-    def __call__(self, train_net, param):
+    def __call__(self, net, param_init_net, param, grad=None):
         assert isinstance(param, core.BlobReference)
-        return self._run(train_net, param)
+        return self._run(net, param_init_net, param, grad)
 
-    def _run(self, train_net, param):
+    def _run(self, net, param_init_net, param, grad):
         raise Exception("Not Impelemented")
 
 
@@ -50,10 +50,10 @@ class L1Norm(Regularizer):
 
         self.reg_lambda = reg_lambda
 
-    def _run(self, train_net, param):
-        output_blob = train_net.NextScopedBlob(param + '_l1_regularization')
-        train_net.LpNorm([param], [output_blob], p=1)
-        train_net.Scale([output_blob], [output_blob], scale=self.reg_lambda)
+    def _run(self, net, param_init_net, param, grad=None):
+        output_blob = net.NextScopedBlob(param + '_l1_regularization')
+        net.LpNorm([param], [output_blob], p=1)
+        net.Scale([output_blob], [output_blob], scale=self.reg_lambda)
         return output_blob
 
 
@@ -65,8 +65,50 @@ class L2Norm(Regularizer):
 
         self.reg_lambda = reg_lambda
 
-    def _run(self, train_net, param):
-        output_blob = train_net.NextScopedBlob(param + '_l2_regularization')
-        train_net.LpNorm([param], [output_blob], p=2)
-        train_net.Scale([output_blob], [output_blob], scale=self.reg_lambda)
+    def _run(self, net, param_init_net, param, grad=None):
+        output_blob = net.NextScopedBlob(param + '_l2_regularization')
+        net.LpNorm([param], [output_blob], p=2)
+        net.Scale([output_blob], [output_blob], scale=self.reg_lambda)
         return output_blob
+
+
+class MaxNorm(Regularizer):
+    def __init__(self, norm=1.0):
+        super(MaxNorm, self).__init__()
+        self.norm = norm
+        self.apply_after_optimizer = True
+
+    def _run(self, net, param_init_net, param, grad):
+        assert self.norm > 0, 'norm should be bigger than 0.'
+        if isinstance(grad, core.GradientSlice):
+            net.SparseNormalize(
+                [param, grad.indices, grad.values],
+                [param],
+                use_max_norm=True,
+                norm=self.norm,
+            )
+        else:
+            raise NotImplementedError(
+                "MaxNorm is not supported for dense parameters"
+            )
+
+
+class ConstantNorm(Regularizer):
+    def __init__(self, norm=1.0):
+        super(ConstantNorm, self).__init__()
+        self.norm = norm
+        self.apply_after_optimizer = True
+
+    def _run(self, net, param_init_net, param, grad):
+        assert self.norm > 0, 'norm should be bigger than 0.'
+        if isinstance(grad, core.GradientSlice):
+            net.SparseNormalize(
+                [param, grad.indices, grad.values],
+                [param],
+                use_max_norm=False,
+                norm=self.norm,
+            )
+        else:
+            raise NotImplementedError(
+                "ConstantNorm is not supported for dense parameters"
+            )

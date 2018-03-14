@@ -17,11 +17,11 @@
 #ifndef CAFFE2_VIDEO_VIDEO_DECODER_H_
 #define CAFFE2_VIDEO_VIDEO_DECODER_H_
 
+#include <caffe2/core/logging.h>
 #include <stdio.h>
 #include <memory>
 #include <string>
 #include <vector>
-#include "caffe2/core/logging.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -41,6 +41,29 @@ enum SpecialFps {
   SAMPLE_NO_FRAME = 0,
   SAMPLE_ALL_FRAMES = -1,
   SAMPLE_TIMESTAMP_ONLY = -2,
+};
+
+// three different types of resolution when decoding the video
+// 0: resize to width x height and ignore the aspect ratio;
+// 1: resize to make size at least (width x height) and keep the aspect ratio;
+// 2: using the original resolution of the video; if resolution
+//    is smaller than crop_height x crop_width, resize to ensure
+//    new height >= crop_height and new width >= crop_width
+//    and keep the aspect ratio;
+enum VideoResType {
+  USE_WIDTH_HEIGHT = 0,
+  USE_MINIMAL_WIDTH_HEIGHT = 1,
+  ORIGINAL_RES = 2,
+};
+
+// three different types of decoding behavior are supported
+// 0: do temporal jittering to sample a random clip from the video
+// 1: sample a clip from a given starting frame
+// 2: uniformly sample multiple clips from the video;
+enum DecodeType {
+  DO_TMP_JITTER = 0,
+  DO_UNIFORM_SMP = 1,
+  USE_START_FRM = 2,
 };
 
 // sampling interval for fps starting at specified timestamp
@@ -76,14 +99,18 @@ class Params {
   // -1 no limit
   int maximumOutputFrames_ = -1;
 
-  // Output video size, -1 to preserve origianl dimension
-  int outputWidth_ = -1;
-  int outputHeight_ = -1;
+  // params for video resolution
+  int video_res_type_ = VideoResType::USE_WIDTH_HEIGHT;
+  int crop_height_ = -1;
+  int crop_width_ = -1;
+  int height_min_ = -1;
+  int width_min_ = -1;
+  int scale_w_ = -1;
+  int scale_h_ = -1;
 
-  // max output dimension, -1 to preserve original size
-  // the larger dimension of the video will be scaled to this size,
-  // and the second dimension will be scaled to preserve aspect ratio
-  int maxOutputDimension_ = -1;
+  // params for decoding behavior
+  int decode_type_ = DecodeType::DO_TMP_JITTER;
+  int num_of_required_frame_ = -1;
 
   // intervals_ control variable sampling fps between different timestamps
   // intervals_ must be ordered strictly ascending by timestamps
@@ -140,7 +167,7 @@ class Params {
    * Output frame width, default to video width
    */
   Params& outputWidth(int width) {
-    outputWidth_ = width;
+    scale_w_ = width;
     return *this;
   }
 
@@ -148,17 +175,7 @@ class Params {
    * Output frame height, default to video height
    */
   Params& outputHeight(int height) {
-    outputHeight_ = height;
-    return *this;
-  }
-
-  /**
-   * Max dimension of either width or height, if any is bigger
-   * it will be scaled down to this and econd dimension
-   * will be scaled down to maintain aspect ratio.
-   */
-  Params& maxOutputDimension(int size) {
-    maxOutputDimension_ = size;
+    scale_h_ = height;
     return *this;
   }
 };
@@ -171,7 +188,7 @@ class DecodedFrame {
       av_free(p);
     }
   };
-  typedef std::unique_ptr<uint8_t, avDeleter> AvDataPtr;
+  using AvDataPtr = std::unique_ptr<uint8_t, avDeleter>;
 
   // decoded data buffer
   AvDataPtr data_;
@@ -198,7 +215,7 @@ class DecodedFrame {
 
 class VideoIOContext {
  public:
-  explicit VideoIOContext(const std::string fname)
+  explicit VideoIOContext(const std::string& fname)
       : workBuffersize_(VIO_BUFFER_SZ),
         workBuffer_((uint8_t*)av_malloc(workBuffersize_)),
         inputFile_(nullptr),
@@ -366,37 +383,36 @@ class VideoDecoder {
   VideoDecoder();
 
   void decodeFile(
-      const std::string filename,
+      const std::string& filename,
       const Params& params,
-      std::vector<std::unique_ptr<DecodedFrame>>& sampledFrames,
-      int maxFrames = 0, /* max frames we want decoded. 0 implies decode all */
-      bool decodeFromStart = true /* decode from start or randomly seek into
-                                     intermediate frame ? */
-      );
+      const int start_frm,
+      std::vector<std::unique_ptr<DecodedFrame>>& sampledFrames);
 
   void decodeMemory(
       const char* buffer,
       const int size,
       const Params& params,
-      std::vector<std::unique_ptr<DecodedFrame>>& sampledFrames,
-      int maxFrames = 0, /* max frames we want decoded. 0 implies decode all */
-      bool decodeFromStart = true /* decode from start or randomly seek into
-                                     intermediate frame ? */
-      );
+      const int start_frm,
+      std::vector<std::unique_ptr<DecodedFrame>>& sampledFrames);
 
  private:
   std::string ffmpegErrorStr(int result);
+
+  void ResizeAndKeepAspectRatio(
+      const int origHeight,
+      const int origWidth,
+      const int heightMin,
+      const int widthMin,
+      int& outHeight,
+      int& outWidth);
 
   void decodeLoop(
       const std::string& videoName,
       VideoIOContext& ioctx,
       const Params& params,
-      std::vector<std::unique_ptr<DecodedFrame>>& sampledFrames,
-      int maxFrames = 0, /* max frames we want decoded. 0 implies decode all */
-      bool decodeFromStart = true /* decode from start or randomly seek into
-                                     intermediate frame ? */
-      );
+      const int start_frm,
+      std::vector<std::unique_ptr<DecodedFrame>>& sampledFrames);
 };
-}
+} // namespace caffe2
 
 #endif // CAFFE2_VIDEO_VIDEO_DECODER_H_

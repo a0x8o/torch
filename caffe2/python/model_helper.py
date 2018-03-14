@@ -20,7 +20,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from caffe2.python import core, scope, workspace
+from caffe2.python import core, scope, workspace, helpers
 from caffe2.python.modeling import parameter_info
 from caffe2.python.modeling.parameter_sharing import (
     parameter_sharing_context,
@@ -29,6 +29,7 @@ from caffe2.python.optimizer_context import (
     OptimizerContext,
     DEFAULT_OPTIM,
 )
+from caffe2.python.regularizer_context import RegularizerContext
 
 from future.utils import viewitems, viewkeys
 from itertools import chain
@@ -234,6 +235,9 @@ class ModelHelper(object):
                 param_info.optimizer = optim_context.get_optimizer(tag)
         if not param_info.optimizer and optim_context.has_optimizer(DEFAULT_OPTIM):
             param_info.optimizer = optim_context.get_optimizer(DEFAULT_OPTIM)
+
+        reg_context = RegularizerContext.current()
+        param_info.regularizer = reg_context
 
         self._parameters_info[param_name] = param_info
         # Add param to legacy structs as well, so all other functions for
@@ -444,12 +448,8 @@ class ModelHelper(object):
             """You cannot pass reader to model_helper.TensorProtosDBInput.
                Use model.net.TensorProtosDBInput instead to create the op."""
 
-        dbreader_name = "dbreader_" + db
-        dbreader = self.param_init_net.CreateDB(
-            [], dbreader_name,
-            db=db, db_type=db_type)
-        return self.net.TensorProtosDBInput(
-            dbreader, blob_out, batch_size=batch_size)
+        return helpers.db_input.db_input(
+            self, blob_out, batch_size, db, db_type, **kwargs)
 
     def GetDevices(self):
         assert len(self._devices) > 0, \

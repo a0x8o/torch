@@ -1,11 +1,9 @@
-set(Caffe2_CPU_OBSERVER_SRCS)
-
-add_subdirectory(observers)
+if (USE_NNPACK)
+  add_subdirectory(nnpack)
+endif()
 if (USE_ZSTD)
   add_subdirectory(zstd)
 endif()
-
-add_library(Caffe2_CPU_OBSERVER STATIC ${Caffe2_CPU_OBSERVER_SRCS})
 
 # CPU source, test sources, binary sources
 set(Caffe2_CPU_SRCS ${Caffe2_CPU_SRCS} PARENT_SCOPE)
