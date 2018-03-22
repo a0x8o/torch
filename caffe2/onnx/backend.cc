@@ -21,7 +21,7 @@ namespace caffe2 { namespace onnx {
 
 namespace {
 
-constexpr static int kKnownOpsetVersion = 4;
+constexpr static int kKnownOpsetVersion = 5;
 
 bool AlmostEqual(double a, double b) {
   constexpr static double kEps = 1e-15;
@@ -332,11 +332,11 @@ Caffe2Backend::get_special_operators() const {
       unordered_map<std::string, Caffe2Backend::SpecialOpConverter>
           kSpecialOperators = {
               {"Constant", &Caffe2Backend::CreateConstant},
-              {"Conv", &Caffe2Backend::CreateConvePoolOpBase},
-              {"AveragePool", &Caffe2Backend::CreateConvePoolOpBase},
-              {"GlobalAveragePool", &Caffe2Backend::CreateConvePoolOpBase},
-              {"GlobalMaxPool", &Caffe2Backend::CreateConvePoolOpBase},
-              {"MaxPool", &Caffe2Backend::CreateConvePoolOpBase},
+              {"Conv", &Caffe2Backend::CreateConvPoolOpBase},
+              {"AveragePool", &Caffe2Backend::CreateConvPoolOpBase},
+              {"GlobalAveragePool", &Caffe2Backend::CreateConvPoolOpBase},
+              {"GlobalMaxPool", &Caffe2Backend::CreateConvPoolOpBase},
+              {"MaxPool", &Caffe2Backend::CreateConvPoolOpBase},
               {"Reshape", &Caffe2Backend::CreateReshape},
               {"Gather", &Caffe2Backend::CreateGather},
               {"Gemm", &Caffe2Backend::CreateGemm},
@@ -345,7 +345,8 @@ Caffe2Backend::get_special_operators() const {
               {"LogSoftmax", &Caffe2Backend::CreateLogSoftmax},
               {"Slice", &Caffe2Backend::CreateSlice},
               {"Sqrt", &Caffe2Backend::CreateSqrt},
-              {"Reciprocal", &Caffe2Backend::CreateReciprocal}};
+              {"Reciprocal", &Caffe2Backend::CreateReciprocal},
+              {"MatMul", &Caffe2Backend::CreateMatMul}};
   return kSpecialOperators;
 }
 
@@ -395,11 +396,10 @@ Caffe2Ops Caffe2Backend::CreateConstant(const ModelProto &init_model,
 //  furthermore, this is *mandatory.*
 //
 //  Finally, ConvPoolOpBase is not the only class of it's kind; there is
-//  also ConvTransposeUnpoolBase, which backs ConvTranspose.  So don't
 //  be tricked by the fact that Conv and ConvTranspose have similar
 //  parameters; they exercise different codepaths and need to be handled
 //  differently.
-Caffe2Ops Caffe2Backend::CreateConvePoolOpBase(const ModelProto &init_model,
+Caffe2Ops Caffe2Backend::CreateConvPoolOpBase(const ModelProto &init_model,
                                                const ModelProto &pred_model,
                                                OnnxNode *onnx_node,
                                                int opset_version) {
@@ -800,6 +800,27 @@ Caffe2Ops Caffe2Backend::CreateSlice(const ModelProto &init_model,
   }
 
   return ret;
+}
+
+Caffe2Ops Caffe2Backend::CreateMatMul(
+    const ModelProto& init_model,
+    const ModelProto& pred_model,
+    OnnxNode* onnx_node,
+    int opset_version) {
+  const auto& node = onnx_node->node;
+  if (node.input_size() != 2) {
+    throw std::runtime_error("MatMul should have 2 inputs");
+  }
+
+  auto c2_op = CommonOnnxNodeToCaffe2Ops(init_model, pred_model, onnx_node,
+                                         opset_version);
+  assert(c2_op.ops.size() == 1);
+  auto* op = c2_op.ops.Mutable(0);
+  auto* broadcast_arg = op->add_arg();
+  broadcast_arg->set_name("broadcast");
+  broadcast_arg->set_i(1);
+
+  return c2_op;
 }
 
 //==============================================
